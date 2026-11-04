@@ -196,13 +196,81 @@ const Storage = {
     },
 
     /**
+     * Check if a state is just an initial default aquarium
+     * Condition: fishCount <= 1 && species is default clownfish,
+     * tankSizeTier === 1, tankCapacityTier === 1,
+     * no custom decorations, no coral, no sunkenCastle,
+     * coins <= 150.
+     * @param {Object} state
+     * @returns {boolean}
+     */
+    isInitialDefaultState(state) {
+        if (!state) return true;
+        const fishList = Array.isArray(state.fishList) ? state.fishList : [];
+        const isDefaultFish = fishList.length === 0 ||
+            (fishList.length === 1 && (!fishList[0].speciesId || fishList[0].speciesId === 'clownfish'));
+
+        const upgrades = state.upgrades || {};
+        const tankSizeTier = upgrades.tankSizeTier || 1;
+        const tankCapacityTier = upgrades.tankCapacityTier || 1;
+
+        const dec = state.decorations || {};
+        const customDecorations = Array.isArray(dec.customDecorations) ? dec.customDecorations : [];
+        const noCustomDecorations = (!customDecorations.length) && !dec.coral && !dec.sunkenCastle;
+
+        const coins = typeof state.coins === 'number' ? state.coins : 0;
+        const coinsLow = coins <= 150;
+
+        return isDefaultFish && tankSizeTier === 1 && tankCapacityTier === 1 && noCustomDecorations && coinsLow;
+    },
+
+    /**
+     * Calculate progress score for an aquarium state
+     * Formula:
+     * (tankSizeTier - 1) * 10000 + (tankCapacityTier - 1) * 5000 + (fishList.length) * 1000 +
+     * (customDecorations.length) * 500 + (coral ? 500 : 0) + (sunkenCastle ? 500 : 0) +
+     * (stats.totalCoinsEarned || coins || 0)
+     * @param {Object} state
+     * @returns {number}
+     */
+    getProgressScore(state) {
+        if (!state) return 0;
+        const upgrades = state.upgrades || {};
+        const tankSizeTier = upgrades.tankSizeTier || 1;
+        const tankCapacityTier = upgrades.tankCapacityTier || 1;
+
+        const fishList = Array.isArray(state.fishList) ? state.fishList : [];
+        const dec = state.decorations || {};
+        const customDecorations = Array.isArray(dec.customDecorations) ? dec.customDecorations : [];
+        const coral = !!dec.coral;
+        const sunkenCastle = !!dec.sunkenCastle;
+
+        const stats = state.stats || {};
+        const coinScore = (typeof stats.totalCoinsEarned === 'number' && stats.totalCoinsEarned > 0)
+            ? stats.totalCoinsEarned
+            : (typeof state.coins === 'number' ? state.coins : 0);
+
+        return ((tankSizeTier - 1) * 10000) +
+               ((tankCapacityTier - 1) * 5000) +
+               (fishList.length * 1000) +
+               (customDecorations.length * 500) +
+               (coral ? 500 : 0) +
+               (sunkenCastle ? 500 : 0) +
+               coinScore;
+    },
+
+    /**
      * Smart Cloud Synchronization
-     * Compares timestamps between local and cloud saves:
-     * - If cloud is newer -> adopts cloud save and updates local.
-     * - If local is newer (or cloud is empty) -> uploads local save to cloud.
+     * Intelligently resolves conflicts between local and cloud saves:
+     * - If local is default empty state and cloud has progress -> FORCE adopt cloud!
+     * - If cloud has higher progress score -> FORCE adopt cloud!
+     * - If options.preferCloud is true and cloud is not default -> adopt cloud!
+     * - If timestamps indicate cloud is newer and cloud is not default -> adopt cloud!
+     * - Only when local has real progress and is ahead -> upload to cloud.
+     * @param {Object} [options={}]
      * @returns {Promise<{action: 'loaded_cloud'|'uploaded_local'|'no_change'|'error', state: Object, message: string}>}
      */
-    async syncWithCloud() {
+    async syncWithCloud(options = {}) {
         if (!window.FirebaseSync || !window.FirebaseSync.getCurrentUser()) {
             const local = await this.load();
             return { action: 'no_change', state: local, message: '未登入帳號，使用本機存檔' };
@@ -222,20 +290,45 @@ const Storage = {
                 return { action: 'uploaded_local', state: localState, message: '雲端尚無存檔，已自動將本機進度同步至雲端！' };
             }
 
-            // Case 2: Compare timestamps
+            // Case 2: Smart comparison
             const cloudState = this.migrateState(cloudResult.data);
             const cloudTime = cloudResult.updatedAt || cloudState.lastSavedTime || 0;
             const localTime = localState.lastSavedTime || 0;
 
-            if (cloudTime > localTime) {
-                // Cloud progress is newer -> download and apply
+            const isLocalDefault = this.isInitialDefaultState(localState);
+            const isCloudDefault = this.isInitialDefaultState(cloudState);
+            const localScore = this.getProgressScore(localState);
+            const cloudScore = this.getProgressScore(cloudState);
+
+            console.log(`[Storage] Cloud sync check: localScore=${localScore} (default=${isLocalDefault}, time=${localTime}), cloudScore=${cloudScore} (default=${isCloudDefault}, time=${cloudTime}), preferCloud=${!!options.preferCloud}`);
+
+            // Rule 1: If local is initial default state and cloud is NOT default -> FORCE adopt cloud!
+            if (isLocalDefault && !isCloudDefault) {
+                await this.saveLocalOnly(cloudState);
+                return { action: 'loaded_cloud', state: cloudState, message: '本機為初始預設狀態，已成功自雲端載入您的水族箱！' };
+            }
+
+            // Rule 2: If cloud progress score > local progress score -> FORCE adopt cloud!
+            if (cloudScore > localScore) {
+                await this.saveLocalOnly(cloudState);
+                return { action: 'loaded_cloud', state: cloudState, message: '雲端進度較高，已成功同步下載雲端存檔！' };
+            }
+
+            // Rule 3: If preferCloud is requested and cloud is NOT initial default -> adopt cloud!
+            if (options.preferCloud === true && !isCloudDefault) {
+                await this.saveLocalOnly(cloudState);
+                return { action: 'loaded_cloud', state: cloudState, message: '已優先同步載入您的雲端水族箱存檔！' };
+            }
+
+            // Rule 4: If cloud is newer and cloud is not empty/default -> adopt cloud
+            if (cloudTime > localTime && !isCloudDefault) {
                 await this.saveLocalOnly(cloudState);
                 return { action: 'loaded_cloud', state: cloudState, message: '發現較新的雲端進度，已自動同步更新！' };
-            } else {
-                // Local progress is newer or equal -> upload to cloud
-                await window.FirebaseSync.saveToCloud(localState);
-                return { action: 'uploaded_local', state: localState, message: '本機進度較新，已成功備份至雲端！' };
             }
+
+            // Rule 5: Local has real progress and is ahead -> upload to cloud
+            await window.FirebaseSync.saveToCloud(localState);
+            return { action: 'uploaded_local', state: localState, message: '本機進度較新，已成功備份至雲端！' };
         } catch (err) {
             console.error('[Storage] syncWithCloud exception:', err);
             const local = await this.load();
@@ -351,7 +444,40 @@ if (window.self !== window.top) {
 
 // PostMessage bridge for migrating Chrome extension local data to GitHub Pages web app
 window.addEventListener('message', async (event) => {
-    if (!event.data || event.data.type !== 'IMPORT_EXTENSION_DATA') return;
+    if (!event.data) return;
+
+    // Handle full state delivered from extension content script bridge
+    if (event.data.type === 'AF_FULL_EXTENSION_STATE' && event.data.state) {
+        try {
+            console.log('[Storage Bridge] Received AF_FULL_EXTENSION_STATE from content script');
+            const state = Storage.migrateState(event.data.state);
+            state.lastSavedTime = Date.now();
+            window._pendingFullExtensionState = state;
+            await Storage.saveLocalOnly(state);
+
+            if (window.game) {
+                window.game._pendingExtensionSync = state;
+                window.game.state = state;
+                if (typeof window.game.applyState === 'function') {
+                    window.game.applyState(state);
+                }
+                const user = window.FirebaseSync ? window.FirebaseSync.getCurrentUser() : null;
+                if (user && typeof window.FirebaseSync.saveToCloud === 'function') {
+                    window.FirebaseSync.saveToCloud(state).then(res => {
+                        if (res && res.success) {
+                            window.game.showToast('🎉 已成功將擴充功能完整魚缸同步至雲端！', 'success', 6000);
+                            window.game._pendingExtensionSync = null;
+                        }
+                    });
+                }
+            }
+        } catch (err) {
+            console.error('[Storage Bridge] Error handling AF_FULL_EXTENSION_STATE:', err);
+        }
+        return;
+    }
+
+    if (event.data.type !== 'IMPORT_EXTENSION_DATA') return;
 
     try {
         const incomingData = event.data.data;

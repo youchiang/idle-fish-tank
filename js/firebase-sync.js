@@ -34,7 +34,28 @@ const FirebaseSync = {
         if (typeof window !== 'undefined' && window.location && window.location.protocol === 'chrome-extension:') {
             this.isInitialized = true;
             this.isAvailable = false;
-            return { success: false, reason: 'extension_environment' };
+
+            // In Chrome Extension popup environment, read bridged cloudUser from chrome.storage.local
+            if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+                chrome.storage.local.get(['cloudUser'], (result) => {
+                    if (result && result.cloudUser) {
+                        this.currentUser = result.cloudUser;
+                        this._notifyAuthListeners(this.currentUser);
+                    }
+                });
+
+                if (chrome.storage.onChanged && !this._hasStorageListener) {
+                    this._hasStorageListener = true;
+                    chrome.storage.onChanged.addListener((changes, areaName) => {
+                        if (areaName === 'local' && changes.cloudUser) {
+                            this.currentUser = changes.cloudUser.newValue || null;
+                            this._notifyAuthListeners(this.currentUser);
+                        }
+                    });
+                }
+            }
+
+            return { success: true, currentUser: this.currentUser, reason: 'extension_bridge' };
         }
 
         if (this.isInitialized) {
@@ -64,6 +85,25 @@ const FirebaseSync = {
             authMod.onAuthStateChanged(this.auth, (user) => {
                 this.currentUser = user;
                 this._notifyAuthListeners(user);
+
+                // Bridge to extension content script if running on web
+                if (typeof window !== 'undefined') {
+                    if (user) {
+                        window.postMessage({
+                            type: 'AF_AUTH_SYNC_TO_EXT',
+                            user: {
+                                uid: user.uid,
+                                displayName: user.displayName || '',
+                                email: user.email || '',
+                                photoURL: user.photoURL || ''
+                            }
+                        }, '*');
+                    } else {
+                        window.postMessage({
+                            type: 'AF_AUTH_LOGOUT_TO_EXT'
+                        }, '*');
+                    }
+                }
             });
 
             this.isInitialized = true;
@@ -106,6 +146,19 @@ const FirebaseSync = {
             const result = await this._authMod.signInWithPopup(this.auth, provider);
             this.currentUser = result.user;
             this._notifyAuthListeners(this.currentUser);
+
+            if (typeof window !== 'undefined' && result.user) {
+                window.postMessage({
+                    type: 'AF_AUTH_SYNC_TO_EXT',
+                    user: {
+                        uid: result.user.uid,
+                        displayName: result.user.displayName || '',
+                        email: result.user.email || '',
+                        photoURL: result.user.photoURL || ''
+                    }
+                }, '*');
+            }
+
             return { success: true, user: result.user };
         } catch (err) {
             console.error('[FirebaseSync] Google login failed:', err);
@@ -127,6 +180,18 @@ const FirebaseSync = {
      * Sign out current user
      */
     async logout() {
+        if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+            try {
+                chrome.storage.local.remove(['cloudUser']);
+            } catch (e) {
+                console.warn('[FirebaseSync] Failed to clear cloudUser in extension:', e);
+            }
+        }
+
+        if (typeof window !== 'undefined') {
+            window.postMessage({ type: 'AF_AUTH_LOGOUT_TO_EXT' }, '*');
+        }
+
         if (!this.isReady() || !this.auth) {
             this.currentUser = null;
             this._notifyAuthListeners(null);
@@ -471,7 +536,7 @@ const FirebaseSync = {
 window.FirebaseSync = FirebaseSync;
 
 // Initiate initialization as soon as loaded
-if (typeof window !== 'undefined' && window.location && window.location.protocol !== 'chrome-extension:') {
+if (typeof window !== 'undefined') {
     FirebaseSync.init().catch(err => {
         console.warn('[FirebaseSync] Initial load notice:', err);
     });

@@ -21,6 +21,13 @@
     "storage",
     "tabs"
   ],
+  "content_scripts": [
+    {
+      "matches": ["https://youchiang.github.io/idle-fish-tank/*"],
+      "js": ["js/extension-bridge.js"],
+      "run_at": "document_start"
+    }
+  ],
   "content_security_policy": {
     "extension_pages": "script-src 'self'; object-src 'self'; img-src 'self' https: data: blob:;"
   }

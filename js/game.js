@@ -240,6 +240,11 @@ class Game {
             // 0. Check Extension Cloud Sync Hash (#cloud_sync=1&data=...)
             this.handleCloudSyncHash();
 
+            // Check if full extension state was delivered from extension bridge
+            if (window._pendingFullExtensionState) {
+                this._pendingExtensionSync = window._pendingFullExtensionState;
+            }
+
             // 1. Load saved state
             this.state = await Storage.load();
             if (this._pendingExtensionSync) {
@@ -925,17 +930,23 @@ class Game {
                         }
                     } else {
                         updateStatus('loading', '🔄', '登入成功！正在智慧同步雲端存檔...');
-                        const syncRes = await Storage.syncWithCloud();
-                        if (syncRes.action === 'loaded_cloud') {
-                            this.applyState(syncRes.state);
-                            updateStatus('success', '✅', '成功自雲端下載最新水族箱進度！');
-                            this.particles.addFloatingText(this.width / 2, 70, '☁️ 雲端存檔同步成功！', '#00cec9', 16);
-                            if (window.soundCtrl) window.soundCtrl.playFanfare();
-                        } else if (syncRes.action === 'uploaded_local') {
-                            updateStatus('success', '✅', '已將目前水族箱進度成功備份至雲端！');
-                            this.particles.addFloatingText(this.width / 2, 70, '☁️ 本地進度已上傳雲端！', '#2ecc71', 16);
-                        } else {
-                            updateStatus('success', '✅', syncRes.message || '雲端同步完成');
+                        this._isAutoSyncing = true;
+                        try {
+                            const syncRes = await Storage.syncWithCloud({ preferCloud: true });
+                            if (syncRes.action === 'loaded_cloud') {
+                                this.applyState(syncRes.state);
+                                updateStatus('success', '✅', '成功自雲端下載最新水族箱進度！');
+                                this.showToast('☁️ 已同步載入您的雲端水族箱！', 'success', 5000);
+                                this.particles.addFloatingText(this.width / 2, 70, '☁️ 雲端存檔同步成功！', '#00cec9', 16);
+                                if (window.soundCtrl) window.soundCtrl.playFanfare();
+                            } else if (syncRes.action === 'uploaded_local') {
+                                updateStatus('success', '✅', '已將目前水族箱進度成功備份至雲端！');
+                                this.particles.addFloatingText(this.width / 2, 70, '☁️ 本地進度已上傳雲端！', '#2ecc71', 16);
+                            } else {
+                                updateStatus('success', '✅', syncRes.message || '雲端同步完成');
+                            }
+                        } finally {
+                            this._isAutoSyncing = false;
                         }
                     }
                 } else {
@@ -1039,6 +1050,28 @@ class Game {
                         }
                     } finally {
                         this._isSavingExtensionSync = false;
+                    }
+                } else if (user && !this._pendingExtensionSync && !this._isAutoSyncing) {
+                    // Check if running on web (protocol !== 'chrome-extension:')
+                    const isExtension = (typeof window !== 'undefined' && window.location && window.location.protocol === 'chrome-extension:');
+                    if (!isExtension) {
+                        this._isAutoSyncing = true;
+                        try {
+                            const syncRes = await Storage.syncWithCloud({ preferCloud: true });
+                            if (syncRes.action === 'loaded_cloud') {
+                                this.applyState(syncRes.state);
+                                updateStatus('success', '✅', '已同步載入您的雲端水族箱！');
+                                this.showToast('☁️ 已同步載入您的雲端水族箱！', 'success', 5000);
+                                this.particles.addFloatingText(this.width / 2, 70, '☁️ 已載入雲端水族箱！', '#00cec9', 16);
+                                if (window.soundCtrl) window.soundCtrl.playFanfare();
+                            } else if (syncRes.action === 'uploaded_local') {
+                                updateStatus('success', '✅', '已將目前水族箱進度備份至雲端！');
+                            }
+                        } catch (syncErr) {
+                            console.warn('[Game] Auto sync notice:', syncErr);
+                        } finally {
+                            this._isAutoSyncing = false;
+                        }
                     }
                 }
             });
