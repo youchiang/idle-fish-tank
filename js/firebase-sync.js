@@ -31,6 +31,12 @@ const FirebaseSync = {
      * Safely catches network/CSP failures without interrupting local gameplay.
      */
     async init() {
+        if (typeof window !== 'undefined' && window.location && window.location.protocol === 'chrome-extension:') {
+            this.isInitialized = true;
+            this.isAvailable = false;
+            return { success: false, reason: 'extension_environment' };
+        }
+
         if (this.isInitialized) {
             return { success: this.isAvailable, currentUser: this.currentUser };
         }
@@ -465,7 +471,7 @@ const FirebaseSync = {
 window.FirebaseSync = FirebaseSync;
 
 // Initiate initialization as soon as loaded
-if (typeof window !== 'undefined') {
+if (typeof window !== 'undefined' && window.location && window.location.protocol !== 'chrome-extension:') {
     FirebaseSync.init().catch(err => {
         console.warn('[FirebaseSync] Initial load notice:', err);
     });
