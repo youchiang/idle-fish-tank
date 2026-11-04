@@ -187,7 +187,7 @@ class Game {
 
         const isOverlongBase64 = (val) => {
             if (typeof val !== 'string') return false;
-            return val.length > 2000;
+            return val.length > 8000;
         };
 
         // 1. Sanitize fishList: preserve vital stats (coins, levels, species, hunger, growth, etc.)
@@ -675,8 +675,12 @@ class Game {
                 const file = e.target.files[0];
                 if (file) {
                     const reader = new FileReader();
-                    reader.onload = (evt) => {
-                        const dataUrl = evt.target.result;
+                    reader.onload = async (evt) => {
+                        let dataUrl = evt.target.result;
+                        if (window.FirebaseSync && typeof window.FirebaseSync.compressBase64Image === 'function') {
+                            const compressed = await window.FirebaseSync.compressBase64Image(dataUrl, 150, 0.8);
+                            if (compressed) dataUrl = compressed;
+                        }
                         const fileNameClean = file.name.replace(/\.[^/.]+$/, "");
                         testAndSetImage(dataUrl, fileNameClean);
                     };
@@ -976,6 +980,9 @@ class Game {
                     return;
                 }
                 updateStatus('loading', '⏳', '正在同步魚缸進度至雲端...');
+                if (window.FirebaseSync && typeof window.FirebaseSync.prepareStateForFirestore === 'function') {
+                    await window.FirebaseSync.prepareStateForFirestore(this.state);
+                }
                 this.saveState();
                 const saveRes = await window.FirebaseSync.saveToCloud(this.state);
                 if (saveRes.success) {
@@ -989,7 +996,15 @@ class Game {
                 } else {
                     const isExtension = (typeof window !== 'undefined' && window.location && window.location.protocol === 'chrome-extension:') ||
                                         (typeof chrome !== 'undefined' && chrome.tabs && typeof chrome.tabs.create === 'function');
-                    if (isExtension) {
+                    const errStr = String(saveRes.error || saveRes.reason || '');
+                    const isAuthOrPermError = saveRes.reason === 'unauthenticated' ||
+                                              errStr.includes('401') ||
+                                              errStr.includes('403') ||
+                                              errStr.includes('unauthenticated') ||
+                                              errStr.includes('PERMISSION_DENIED') ||
+                                              errStr.includes('UNAUTHENTICATED');
+
+                    if (isExtension && isAuthOrPermError) {
                         updateStatus('loading', '🚀', 'REST 直連需要重新授權，正在開啟網頁版同步分頁...');
                         try {
                             const payload = this.sanitizeStateForCloudUrl(this.state);
@@ -1079,9 +1094,9 @@ class Game {
                         this._initialCloudSyncDone = true;
                     }
                 } else if (user && !this._pendingExtensionSync && !this._isAutoSyncing) {
-                    // Check if running on web (protocol !== 'chrome-extension:')
                     const isExtension = (typeof window !== 'undefined' && window.location && window.location.protocol === 'chrome-extension:');
-                    if (!isExtension) {
+                    const canSync = !isExtension || !!(user.idToken || user.refreshToken);
+                    if (canSync) {
                         this._isAutoSyncing = true;
                         try {
                             const syncRes = await Storage.syncWithCloud({ preferCloud: true });
@@ -1096,7 +1111,9 @@ class Game {
                                 updateStatus('success', '✅', '已將目前水族箱進度備份至雲端！');
                             }
                         } catch (syncErr) {
-                            console.warn('[Game] Auto sync notice:', syncErr);
+                            if (!isExtension) {
+                                console.warn('[Game] Auto sync notice:', syncErr);
+                            }
                         } finally {
                             this._isAutoSyncing = false;
                             this._initialCloudSyncDone = true;
@@ -1428,8 +1445,13 @@ class Game {
                 const file = e.target.files[0];
                 if (file) {
                     const reader = new FileReader();
-                    reader.onload = (evt) => {
-                        this.editUploadImage = evt.target.result;
+                    reader.onload = async (evt) => {
+                        let dataUrl = evt.target.result;
+                        if (window.FirebaseSync && typeof window.FirebaseSync.compressBase64Image === 'function') {
+                            const compressed = await window.FirebaseSync.compressBase64Image(dataUrl, 150, 0.8);
+                            if (compressed) dataUrl = compressed;
+                        }
+                        this.editUploadImage = dataUrl;
                         if (previewImg) previewImg.src = this.editUploadImage;
                     };
                     reader.readAsDataURL(file);
@@ -1617,8 +1639,12 @@ class Game {
                 const file = e.target.files[0];
                 if (file) {
                     const reader = new FileReader();
-                    reader.onload = (evt) => {
-                        const dataUrl = evt.target.result;
+                    reader.onload = async (evt) => {
+                        let dataUrl = evt.target.result;
+                        if (window.FirebaseSync && typeof window.FirebaseSync.compressBase64Image === 'function') {
+                            const compressed = await window.FirebaseSync.compressBase64Image(dataUrl, 160, 0.8);
+                            if (compressed) dataUrl = compressed;
+                        }
                         const fileNameClean = file.name.replace(/\.[^/.]+$/, "");
                         setDecorPreview(dataUrl, fileNameClean);
                     };
@@ -1714,9 +1740,14 @@ class Game {
         });
 
         if (customHandUrlInput) {
-            customHandUrlInput.addEventListener('input', () => {
+            customHandUrlInput.addEventListener('input', async () => {
+                let val = customHandUrlInput.value.trim();
+                if (val.startsWith('data:image/') && window.FirebaseSync && typeof window.FirebaseSync.compressBase64Image === 'function') {
+                    const compressed = await window.FirebaseSync.compressBase64Image(val, 140, 0.75);
+                    if (compressed) val = compressed;
+                }
                 if (this.state.eventSettings) {
-                    this.state.eventSettings.customHandUrl = customHandUrlInput.value.trim();
+                    this.state.eventSettings.customHandUrl = val;
                 }
                 this.saveState();
             });

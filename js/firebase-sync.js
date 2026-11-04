@@ -66,9 +66,8 @@ const FirebaseSync = {
         if (typeof val === 'object') {
             const fields = {};
             for (const [k, v] of Object.entries(val)) {
-                if (v !== undefined && typeof v !== 'function') {
-                    fields[k] = this.toFirestoreValue(v);
-                }
+                if (!k || v === undefined || typeof v === 'function') continue;
+                fields[k] = this.toFirestoreValue(v);
             }
             return {
                 mapValue: { fields }
@@ -125,9 +124,8 @@ const FirebaseSync = {
         if (!obj || typeof obj !== 'object') return {};
         const fields = {};
         for (const [k, v] of Object.entries(obj)) {
-            if (v !== undefined && typeof v !== 'function') {
-                fields[k] = this.toFirestoreValue(v);
-            }
+            if (!k || v === undefined || typeof v === 'function') continue;
+            fields[k] = this.toFirestoreValue(v);
         }
         return fields;
     },
@@ -570,18 +568,214 @@ const FirebaseSync = {
     },
 
     /**
+     * Compress Base64 image data URL to lightweight WebP/JPEG format
+     * @param {string} dataUrl
+     * @param {number} [maxDim=140]
+     * @param {number} [quality=0.75]
+     * @returns {Promise<string>}
+     */
+    async compressBase64Image(dataUrl, maxDim = 140, quality = 0.75) {
+        if (!dataUrl || typeof dataUrl !== 'string') return '';
+        if (!dataUrl.startsWith('data:image/')) {
+            return dataUrl.length > 15000 ? '' : dataUrl;
+        }
+        if (dataUrl.length <= 18000) {
+            return dataUrl;
+        }
+
+        // If in browser DOM with Image & Canvas available
+        if (typeof document !== 'undefined' && typeof Image !== 'undefined') {
+            return new Promise((resolve) => {
+                let resolved = false;
+                const timer = setTimeout(() => {
+                    if (!resolved) {
+                        resolved = true;
+                        resolve('');
+                    }
+                }, 1500);
+
+                const img = new Image();
+                img.onload = () => {
+                    if (resolved) return;
+                    try {
+                        let w = img.naturalWidth || img.width || maxDim;
+                        let h = img.naturalHeight || img.height || maxDim;
+                        const maxSide = Math.max(w, h);
+                        if (maxSide > maxDim) {
+                            const scale = maxDim / maxSide;
+                            w = Math.max(1, Math.round(w * scale));
+                            h = Math.max(1, Math.round(h * scale));
+                        }
+
+                        const canvas = document.createElement('canvas');
+                        canvas.width = w;
+                        canvas.height = h;
+                        const ctx = canvas.getContext('2d');
+                        ctx.drawImage(img, 0, 0, w, h);
+
+                        let resUrl = canvas.toDataURL('image/webp', quality);
+                        if (!resUrl.startsWith('data:image/webp') || resUrl.length > dataUrl.length) {
+                            const pngUrl = canvas.toDataURL('image/png');
+                            const jpegUrl = canvas.toDataURL('image/jpeg', quality);
+                            resUrl = (pngUrl.length <= jpegUrl.length) ? pngUrl : jpegUrl;
+                            if (resUrl.length > dataUrl.length) {
+                                resUrl = dataUrl;
+                            }
+                        }
+
+                        // If resulting string is still > 30000 chars, retry with smaller dimensions
+                        if (resUrl.length > 30000) {
+                            const smallMaxDim = 80;
+                            const sSide = Math.max(img.naturalWidth || 1, img.naturalHeight || 1);
+                            const sScale = Math.min(1, smallMaxDim / sSide);
+                            const sw = Math.max(1, Math.round((img.naturalWidth || smallMaxDim) * sScale));
+                            const sh = Math.max(1, Math.round((img.naturalHeight || smallMaxDim) * sScale));
+                            canvas.width = sw;
+                            canvas.height = sh;
+                            ctx.clearRect(0, 0, sw, sh);
+                            ctx.drawImage(img, 0, 0, sw, sh);
+                            resUrl = canvas.toDataURL('image/webp', 0.6);
+                            if (!resUrl.startsWith('data:image/webp')) {
+                                resUrl = canvas.toDataURL('image/jpeg', 0.6);
+                            }
+                        }
+
+                        resolved = true;
+                        clearTimeout(timer);
+                        if (resUrl.length > 35000) {
+                            resolve('');
+                        } else {
+                            resolve(resUrl);
+                        }
+                    } catch (e) {
+                        resolved = true;
+                        clearTimeout(timer);
+                        resolve('');
+                    }
+                };
+
+                img.onerror = () => {
+                    if (!resolved) {
+                        resolved = true;
+                        clearTimeout(timer);
+                        resolve('');
+                    }
+                };
+
+                img.src = dataUrl;
+            });
+        }
+
+        // Non-browser or headless environment without DOM
+        return dataUrl.length > 18000 ? '' : dataUrl;
+    },
+
+    /**
+     * Prepare, compress and sanitize game state before writing to Firestore.
+     * Guarantees payload stays well under Firestore's 1MB / HTTP 400 document cap.
+     * @param {Object} gameState
+     * @returns {Promise<Object>}
+     */
+    async prepareStateForFirestore(gameState) {
+        const cleanState = JSON.parse(JSON.stringify(gameState || {}));
+
+        // 1. Compress fishList custom images
+        if (Array.isArray(cleanState.fishList)) {
+            for (let i = 0; i < cleanState.fishList.length; i++) {
+                const fish = cleanState.fishList[i];
+                if (fish && fish.customImage && fish.customImage.length > 18000) {
+                    const compressed = await this.compressBase64Image(fish.customImage, 140, 0.75);
+                    if (compressed) {
+                        fish.customImage = compressed;
+                    } else {
+                        delete fish.customImage;
+                    }
+
+                    if (gameState && Array.isArray(gameState.fishList) && gameState.fishList[i]) {
+                        if (fish.customImage) {
+                            gameState.fishList[i].customImage = fish.customImage;
+                        } else {
+                            delete gameState.fishList[i].customImage;
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Compress customDecorations
+        if (cleanState.decorations && Array.isArray(cleanState.decorations.customDecorations)) {
+            for (let i = 0; i < cleanState.decorations.customDecorations.length; i++) {
+                const decor = cleanState.decorations.customDecorations[i];
+                if (decor && decor.imageUrl && decor.imageUrl.length > 18000) {
+                    const compressed = await this.compressBase64Image(decor.imageUrl, 160, 0.75);
+                    if (compressed) {
+                        decor.imageUrl = compressed;
+                    } else {
+                        delete decor.imageUrl;
+                    }
+
+                    if (gameState && gameState.decorations && Array.isArray(gameState.decorations.customDecorations) && gameState.decorations.customDecorations[i]) {
+                        if (decor.imageUrl) {
+                            gameState.decorations.customDecorations[i].imageUrl = decor.imageUrl;
+                        } else {
+                            delete gameState.decorations.customDecorations[i].imageUrl;
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Compress eventSettings customHandUrl
+        if (cleanState.eventSettings && cleanState.eventSettings.customHandUrl && cleanState.eventSettings.customHandUrl.length > 18000) {
+            const compressed = await this.compressBase64Image(cleanState.eventSettings.customHandUrl, 140, 0.75);
+            cleanState.eventSettings.customHandUrl = compressed || '';
+            if (gameState && gameState.eventSettings) {
+                gameState.eventSettings.customHandUrl = cleanState.eventSettings.customHandUrl;
+            }
+        }
+
+        // 4. Hard Size Cap Guarantee: must not exceed 450,000 bytes
+        const HARD_CAP = 450000;
+        let serializedLen = JSON.stringify(cleanState).length;
+        if (serializedLen > HARD_CAP) {
+            console.warn(`[FirebaseSync] CleanState exceeds ${HARD_CAP} bytes (${serializedLen}), stripping large image data...`);
+            if (Array.isArray(cleanState.fishList)) {
+                for (const fish of cleanState.fishList) {
+                    if (fish.customImage && fish.customImage.length > 5000) {
+                        delete fish.customImage;
+                        if (JSON.stringify(cleanState).length <= HARD_CAP) break;
+                    }
+                }
+            }
+            if (JSON.stringify(cleanState).length > HARD_CAP && cleanState.decorations && Array.isArray(cleanState.decorations.customDecorations)) {
+                for (const decor of cleanState.decorations.customDecorations) {
+                    if (decor.imageUrl && decor.imageUrl.length > 5000) {
+                        delete decor.imageUrl;
+                        if (JSON.stringify(cleanState).length <= HARD_CAP) break;
+                    }
+                }
+            }
+            if (JSON.stringify(cleanState).length > HARD_CAP && cleanState.eventSettings && cleanState.eventSettings.customHandUrl && cleanState.eventSettings.customHandUrl.length > 5000) {
+                cleanState.eventSettings.customHandUrl = '';
+            }
+        }
+
+        return cleanState;
+    },
+
+    /**
      * Save game state to Firestore at `users/{uid}` and update `publicTanks/{uid}`
      * Supports both Firebase JS SDK and Native Firestore REST API direct fallback.
      * @param {Object} gameState
      */
     async saveToCloud(gameState) {
-        if (!this.currentUser) {
+        if (!this.currentUser || !this.currentUser.uid) {
             return { success: false, reason: 'unauthenticated' };
         }
 
         try {
             const uid = this.currentUser.uid;
-            const cleanState = JSON.parse(JSON.stringify(gameState));
+            const cleanState = await this.prepareStateForFirestore(gameState);
             const now = Date.now();
             cleanState.lastSavedTime = now;
             cleanState.lastCloudSyncTime = now;

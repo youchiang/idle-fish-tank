@@ -235,7 +235,7 @@ const Storage = {
         const noCustomDecorations = (!customDecorations.length) && !dec.coral && !dec.sunkenCastle;
 
         const coins = typeof state.coins === 'number' ? state.coins : 0;
-        const coinsLow = coins <= 150;
+        const coinsLow = coins <= 600;
 
         return isDefaultFish && tankSizeTier === 1 && tankCapacityTier === 1 && noCustomDecorations && coinsLow;
     },
@@ -243,7 +243,7 @@ const Storage = {
     /**
      * Calculate progress score for an aquarium state
      * Formula:
-     * (tankSizeTier - 1) * 10000 + (tankCapacityTier - 1) * 5000 + (fishList.length) * 1000 +
+     * (tankSizeTier - 1) * 10000 + (tankCapacityTier - 1) * 5000 + upgradeBonus + (fishList.length) * 1000 +
      * (customDecorations.length) * 500 + (coral ? 500 : 0) + (sunkenCastle ? 500 : 0) +
      * (stats.totalCoinsEarned || coins || 0)
      * @param {Object} state
@@ -254,6 +254,7 @@ const Storage = {
         const upgrades = state.upgrades || {};
         const tankSizeTier = upgrades.tankSizeTier || 1;
         const tankCapacityTier = upgrades.tankCapacityTier || 1;
+        const upgradeBonus = ((upgrades.foodTier || 1) - 1) * 2000 + (upgrades.autoFeederTier || 0) * 2500 + ((upgrades.filterTier || 1) - 1) * 2000;
 
         const fishList = Array.isArray(state.fishList) ? state.fishList : [];
         const dec = state.decorations || {};
@@ -268,6 +269,7 @@ const Storage = {
 
         return ((tankSizeTier - 1) * 10000) +
                ((tankCapacityTier - 1) * 5000) +
+               upgradeBonus +
                (fishList.length * 1000) +
                (customDecorations.length * 500) +
                (coral ? 500 : 0) +
@@ -279,10 +281,11 @@ const Storage = {
      * Smart Cloud Synchronization
      * Intelligently resolves conflicts between local and cloud saves:
      * - If local is default empty state and cloud has progress -> FORCE adopt cloud!
+     * - If local has real progress and cloud is default empty state -> FORCE upload local!
      * - If cloud has higher progress score -> FORCE adopt cloud!
-     * - If options.preferCloud is true and cloud is not default -> adopt cloud!
-     * - If timestamps indicate cloud is newer and cloud is not default -> adopt cloud!
-     * - Only when local has real progress and is ahead -> upload to cloud.
+     * - If local has higher progress score -> FORCE upload local!
+     * - If scores are equal and timestamps indicate cloud is newer -> adopt cloud!
+     * - Otherwise -> upload local to cloud.
      * @param {Object} [options={}]
      * @returns {Promise<{action: 'loaded_cloud'|'uploaded_local'|'no_change'|'error', state: Object, message: string}>}
      */
@@ -338,33 +341,52 @@ const Storage = {
                 return { action: 'loaded_cloud', state: cloudState, message: '已強制同步下載雲端存檔！' };
             }
 
-            // 3. Local is default empty state and cloud is NOT default -> FORCE adopt cloud!
+            // Conflict resolution priority:
+            // 1. Local is default empty state and cloud is NOT default -> FORCE adopt cloud!
             if (isLocalDefault && !isCloudDefault) {
                 cloudState.lastCloudSyncTime = cloudTime;
                 await this.saveLocalOnly(cloudState);
                 return { action: 'loaded_cloud', state: cloudState, message: '本機為初始預設狀態，已成功自雲端載入您的水族箱！' };
             }
 
-            // 4. Cloud has newer updates than local's last sync time AND (cloudScore >= localScore OR preferCloud)
-            if ((cloudTime > localSyncTime + 2000) && (cloudScore >= localScore || options.preferCloud === true)) {
-                cloudState.lastCloudSyncTime = cloudTime;
-                await this.saveLocalOnly(cloudState);
-                return { action: 'loaded_cloud', state: cloudState, message: '發現較新的雲端進度，已自動同步更新！' };
+            // 2. Local has progress and cloud is default -> FORCE upload local! (Never let a default cloud tank overwrite a non-default local tank!)
+            if (!isLocalDefault && isCloudDefault) {
+                const saveRes = await window.FirebaseSync.saveToCloud(localState);
+                const syncTime = (saveRes && saveRes.timestamp) || Date.now();
+                localState.lastCloudSyncTime = syncTime;
+                await this.saveLocalOnly(localState);
+                return { action: 'uploaded_local', state: localState, message: '偵測到雲端為初始狀態，已自動將本機魚缸備份至雲端！' };
             }
 
-            // 5. Cloud progress score > local progress score -> FORCE adopt cloud!
+            // 3. Cloud progress score > local progress score -> FORCE adopt cloud!
             if (cloudScore > localScore) {
                 cloudState.lastCloudSyncTime = cloudTime;
                 await this.saveLocalOnly(cloudState);
                 return { action: 'loaded_cloud', state: cloudState, message: '雲端進度較高，已成功同步下載雲端存檔！' };
             }
 
-            // 6. Otherwise: local is ahead -> upload to cloud
+            // 4. Local progress score > cloud progress score -> FORCE upload local! (Never let a lower-progress cloud tank overwrite a higher-progress local tank!)
+            if (localScore > cloudScore) {
+                const saveRes = await window.FirebaseSync.saveToCloud(localState);
+                const syncTime = (saveRes && saveRes.timestamp) || Date.now();
+                localState.lastCloudSyncTime = syncTime;
+                await this.saveLocalOnly(localState);
+                return { action: 'uploaded_local', state: localState, message: '本機進度較高，已成功備份至雲端！' };
+            }
+
+            // 5. Cloud progress score === local progress score AND cloud is newer -> adopt cloud
+            if (cloudScore === localScore && (cloudTime > localSyncTime + 2000)) {
+                cloudState.lastCloudSyncTime = cloudTime;
+                await this.saveLocalOnly(cloudState);
+                return { action: 'loaded_cloud', state: cloudState, message: '發現較新的雲端進度，已自動同步更新！' };
+            }
+
+            // 6. Otherwise -> upload local to cloud
             const saveRes = await window.FirebaseSync.saveToCloud(localState);
             const syncTime = (saveRes && saveRes.timestamp) || Date.now();
             localState.lastCloudSyncTime = syncTime;
             await this.saveLocalOnly(localState);
-            return { action: 'uploaded_local', state: localState, message: '本機進度較新，已成功備份至雲端！' };
+            return { action: 'uploaded_local', state: localState, message: '本機進度已成功備份至雲端！' };
         } catch (err) {
             console.error('[Storage] syncWithCloud exception:', err);
             const local = await this.load();
@@ -499,7 +521,10 @@ if (typeof window !== 'undefined') {
     if (event.data.type === 'AF_FULL_EXTENSION_STATE' && event.data.state) {
         try {
             console.log('[Storage Bridge] Received AF_FULL_EXTENSION_STATE from content script');
-            const state = Storage.migrateState(event.data.state);
+            let state = Storage.migrateState(event.data.state);
+            if (window.FirebaseSync && typeof window.FirebaseSync.prepareStateForFirestore === 'function') {
+                state = await window.FirebaseSync.prepareStateForFirestore(state);
+            }
             state.lastSavedTime = Date.now();
             window._pendingFullExtensionState = state;
             await Storage.saveLocalOnly(state);
