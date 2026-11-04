@@ -169,6 +169,72 @@ class Game {
         }
     }
 
+    /**
+     * Sanitize state for cloud sync URL transmission to keep payload small (< 15KB).
+     * If custom fish or decorations have large Base64 images (> 2000 chars),
+     * strip the bulky image data while preserving all core stats (coins, levels,
+     * species, hunger, happiness, growth, bornTime, decor positions, upgrades, etc.).
+     */
+    sanitizeStateForCloudUrl(rawState) {
+        if (!rawState) return {};
+        let clean;
+        try {
+            clean = JSON.parse(JSON.stringify(rawState));
+        } catch (e) {
+            clean = Object.assign({}, rawState);
+        }
+
+        const isOverlongBase64 = (val) => {
+            if (typeof val !== 'string') return false;
+            return val.length > 2000;
+        };
+
+        // 1. Sanitize fishList: preserve vital stats (coins, levels, species, hunger, growth, etc.)
+        if (Array.isArray(clean.fishList)) {
+            clean.fishList = clean.fishList.map(fish => {
+                const f = { ...fish };
+                if (isOverlongBase64(f.customImage)) {
+                    delete f.customImage;
+                }
+                return f;
+            });
+        }
+
+        // 2. Sanitize custom decorations: preserve positions, scale, enabled status
+        if (clean.decorations && Array.isArray(clean.decorations.customDecorations)) {
+            clean.decorations.customDecorations = clean.decorations.customDecorations.map(decor => {
+                const d = { ...decor };
+                if (isOverlongBase64(d.imageUrl)) {
+                    delete d.imageUrl;
+                }
+                return d;
+            });
+        }
+
+        // 3. Sanitize eventSettings (custom hand sprite)
+        if (clean.eventSettings && isOverlongBase64(clean.eventSettings.customHandUrl)) {
+            clean.eventSettings.customHandUrl = '';
+        }
+
+        // 4. Ensure total encoded payload is strictly under 15KB safe browser threshold (~14500 chars)
+        let encoded = encodeURIComponent(JSON.stringify(clean));
+        const MAX_SAFE_URL_PAYLOAD = 14500;
+        if (encoded.length > MAX_SAFE_URL_PAYLOAD) {
+            console.warn('[CloudSync] Encoded state payload exceeds safe size, stripping remaining non-critical image data...');
+            if (Array.isArray(clean.fishList)) {
+                clean.fishList.forEach(f => { delete f.customImage; });
+            }
+            if (clean.decorations && Array.isArray(clean.decorations.customDecorations)) {
+                clean.decorations.customDecorations.forEach(d => { delete d.imageUrl; });
+            }
+            if (clean.eventSettings) {
+                clean.eventSettings.customHandUrl = '';
+            }
+        }
+
+        return clean;
+    }
+
     async init() {
         try {
             // 0. Check Extension Cloud Sync Hash (#cloud_sync=1&data=...)
@@ -776,6 +842,7 @@ class Game {
                     updateStatus('info', '☁️', `雲端已連線，上次同步：${new Date(this.state.lastSavedTime || Date.now()).toLocaleTimeString()}`);
                 } else {
                     const isExtension = (typeof chrome !== 'undefined' && chrome.tabs && typeof chrome.tabs.create === 'function') ||
+                                        (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.id) ||
                                         (typeof window !== 'undefined' && window.location && window.location.protocol === 'chrome-extension:');
                     if (isExtension) {
                         updateStatus('info', 'ℹ️', '點擊下方「Google 一鍵登入」，將自動為您開啟新分頁並備份本機魚缸至雲端！');
@@ -791,6 +858,7 @@ class Game {
         // Google Login
         if (googleLoginBtn) {
             const isExtensionEnv = (typeof chrome !== 'undefined' && chrome.tabs && typeof chrome.tabs.create === 'function') ||
+                                   (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.id) ||
                                    (typeof window !== 'undefined' && window.location && window.location.protocol === 'chrome-extension:');
             if (isExtensionEnv) {
                 googleLoginBtn.innerHTML = '<span class="btn-icon">🌐</span> Google 一鍵登入同步至雲端';
@@ -798,6 +866,7 @@ class Game {
 
             googleLoginBtn.addEventListener('click', async () => {
                 const isExtension = (typeof chrome !== 'undefined' && chrome.tabs && typeof chrome.tabs.create === 'function') ||
+                                    (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.id) ||
                                     (typeof window !== 'undefined' && window.location && window.location.protocol === 'chrome-extension:');
 
                 if (isExtension) {
@@ -806,11 +875,21 @@ class Game {
                     updateStatus('loading', '🚀', '正在準備本機魚缸資料並開啟授權同步分頁...');
 
                     try {
-                        const encodedData = encodeURIComponent(JSON.stringify(stateToSync));
+                        const payload = this.sanitizeStateForCloudUrl(stateToSync);
+                        const encodedData = encodeURIComponent(JSON.stringify(payload));
                         const targetUrl = `https://youchiang.github.io/idle-fish-tank/#cloud_sync=1&data=${encodedData}`;
 
                         if (typeof chrome !== 'undefined' && chrome.tabs && typeof chrome.tabs.create === 'function') {
-                            chrome.tabs.create({ url: targetUrl });
+                            chrome.tabs.create({ url: targetUrl }, (tab) => {
+                                if (chrome.runtime && chrome.runtime.lastError) {
+                                    console.error('[CloudSync] chrome.tabs.create error:', chrome.runtime.lastError.message || chrome.runtime.lastError);
+                                    try {
+                                        window.open(targetUrl, '_blank');
+                                    } catch (openErr) {
+                                        console.error('[CloudSync] Fallback window.open failed:', openErr);
+                                    }
+                                }
+                            });
                         } else {
                             window.open(targetUrl, '_blank');
                         }
