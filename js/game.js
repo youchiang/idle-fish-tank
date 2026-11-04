@@ -793,6 +793,8 @@ class Game {
         const googleLoginBtn = document.getElementById('googleLoginBtn');
         const googleLogoutBtn = document.getElementById('googleLogoutBtn');
         const syncNowBtn = document.getElementById('syncNowBtn');
+        const forceDownloadCloudBtn = document.getElementById('forceDownloadCloudBtn');
+        const forceUploadCloudBtn = document.getElementById('forceUploadCloudBtn');
         const exportSaveBtn = document.getElementById('exportSaveBtn');
         const importSaveBtn = document.getElementById('importSaveBtn');
         const importSaveFileInput = document.getElementById('importSaveFileInput');
@@ -831,6 +833,8 @@ class Game {
                 if (googleLoginBtn) googleLoginBtn.classList.add('hidden');
                 if (googleLogoutBtn) googleLogoutBtn.classList.remove('hidden');
                 if (syncNowBtn) syncNowBtn.disabled = false;
+                if (forceDownloadCloudBtn) forceDownloadCloudBtn.disabled = false;
+                if (forceUploadCloudBtn) forceUploadCloudBtn.disabled = false;
             } else {
                 if (cloudAuthBtn) {
                     cloudAuthBtn.innerHTML = `👤 登入`;
@@ -843,6 +847,8 @@ class Game {
                 if (googleLoginBtn) googleLoginBtn.classList.remove('hidden');
                 if (googleLogoutBtn) googleLogoutBtn.classList.add('hidden');
                 if (syncNowBtn) syncNowBtn.disabled = true;
+                if (forceDownloadCloudBtn) forceDownloadCloudBtn.disabled = true;
+                if (forceUploadCloudBtn) forceUploadCloudBtn.disabled = true;
             }
             this.updateTankIdUI();
         };
@@ -1044,6 +1050,91 @@ class Game {
             });
         }
 
+        // Force Download from Cloud (Overwrites local)
+        if (forceDownloadCloudBtn) {
+            forceDownloadCloudBtn.addEventListener('click', async () => {
+                if (!window.FirebaseSync || !window.FirebaseSync.getCurrentUser()) {
+                    updateStatus('error', '⚠️', '請先登入 Google 帳號後再進行同步');
+                    return;
+                }
+                if (!confirm('確定要強制從雲端下載並覆蓋本地魚缸嗎？\n此操作將以雲端存檔為主。')) {
+                    return;
+                }
+                updateStatus('loading', '⏳', '正在強制從雲端下載最新進度...');
+                const syncRes = await Storage.syncWithCloud({ forceDownload: true });
+                if (syncRes.action === 'loaded_cloud') {
+                    this.applyState(syncRes.state);
+                    const syncTime = syncRes.state.lastCloudSyncTime || Date.now();
+                    const timeStr = new Date(syncTime).toLocaleTimeString();
+                    updateStatus('success', '✅', `已強制從雲端載入魚缸！(${timeStr})`);
+                    this.particles.addFloatingText(this.width / 2, 70, '⬇️ 雲端進度已覆蓋本地！', '#00cec9', 16);
+                    if (window.soundCtrl) window.soundCtrl.playCoinSound();
+                } else {
+                    updateStatus('error', '❌', `下載失敗：${syncRes.message || '請檢查網路'}`);
+                }
+            });
+        }
+
+        // Force Upload to Cloud (Overwrites cloud)
+        if (forceUploadCloudBtn) {
+            forceUploadCloudBtn.addEventListener('click', async () => {
+                if (!window.FirebaseSync || !window.FirebaseSync.getCurrentUser()) {
+                    updateStatus('error', '⚠️', '請先登入 Google 帳號後再進行同步');
+                    return;
+                }
+                if (!confirm('確定要強制將本地魚缸上傳至雲端嗎？\n此操作將覆蓋雲端上的存檔。')) {
+                    return;
+                }
+                updateStatus('loading', '⏳', '正在強制上傳本地魚缸至雲端...');
+                if (window.FirebaseSync && typeof window.FirebaseSync.prepareStateForFirestore === 'function') {
+                    await window.FirebaseSync.prepareStateForFirestore(this.state);
+                }
+                this.saveState();
+
+                const syncRes = await Storage.syncWithCloud({ forceUpload: true });
+                if (syncRes.action === 'uploaded_local') {
+                    this.applyState(syncRes.state);
+                    const syncTime = syncRes.state.lastCloudSyncTime || Date.now();
+                    const timeStr = new Date(syncTime).toLocaleTimeString();
+                    updateStatus('success', '✅', `本地魚缸已強制覆蓋至雲端！(${timeStr})`);
+                    this.particles.addFloatingText(this.width / 2, 70, '⬆️ 本地進度已上傳至雲端！', '#2ecc71', 16);
+                    if (window.soundCtrl) window.soundCtrl.playCoinSound();
+                } else if (syncRes.action === 'error') {
+                    const isExtension = (typeof window !== 'undefined' && window.location && window.location.protocol === 'chrome-extension:') ||
+                                        (typeof chrome !== 'undefined' && chrome.tabs && typeof chrome.tabs.create === 'function');
+                    const errStr = String(syncRes.message || '');
+                    const isAuthOrPermError = errStr.includes('401') ||
+                                              errStr.includes('403') ||
+                                              errStr.includes('unauthenticated') ||
+                                              errStr.includes('PERMISSION_DENIED') ||
+                                              errStr.includes('UNAUTHENTICATED');
+
+                    if (isExtension && isAuthOrPermError) {
+                        updateStatus('loading', '🚀', 'REST 直連需要重新授權，正在開啟網頁版同步分頁...');
+                        try {
+                            if (window.FirebaseSync && typeof window.FirebaseSync.prepareStateForFirestore === 'function') {
+                                await window.FirebaseSync.prepareStateForFirestore(this.state);
+                            }
+                            const payload = this.sanitizeStateForCloudUrl(this.state);
+                            const encodedData = encodeURIComponent(JSON.stringify(payload));
+                            const targetUrl = `https://youchiang.github.io/idle-fish-tank/#cloud_sync=1&data=${encodedData}`;
+                            if (typeof chrome !== 'undefined' && chrome.tabs && typeof chrome.tabs.create === 'function') {
+                                chrome.tabs.create({ url: targetUrl });
+                            } else {
+                                window.open(targetUrl, '_blank');
+                            }
+                        } catch (tabErr) {
+                            updateStatus('error', '❌', `強制上傳失敗：${syncRes.message || '請檢查網路'}`);
+                        }
+                    } else {
+                        updateStatus('error', '❌', `強制上傳失敗：${syncRes.message || '請檢查網路'}`);
+                    }
+                } else {
+                    updateStatus('success', '✅', syncRes.message || '雲端同步完成');
+                }
+            });
+        }
+
         // Auto sync on tab focus / visibility change (Web app)
         if (typeof document !== 'undefined' && document.addEventListener) {
             document.addEventListener('visibilitychange', async () => {
@@ -1135,31 +1226,28 @@ class Game {
                         this._isSavingExtensionSync = false;
                         this._initialCloudSyncDone = true;
                     }
-                } else if (user && !this._pendingExtensionSync && !this._isAutoSyncing) {
-                    const isExtension = (typeof window !== 'undefined' && window.location && window.location.protocol === 'chrome-extension:');
-                    const canSync = !isExtension || !!(user.idToken || user.refreshToken);
-                    if (canSync) {
-                        this._isAutoSyncing = true;
-                        try {
-                            const syncRes = await Storage.syncWithCloud({ preferCloud: true });
-                            if (syncRes.action === 'loaded_cloud') {
-                                this.applyState(syncRes.state);
-                                this.state.lastCloudSyncTime = syncRes.state.lastCloudSyncTime || Date.now();
-                                updateStatus('success', '✅', '已同步載入您的雲端水族箱！');
-                                this.showToast('☁️ 已同步載入您的雲端水族箱！', 'success', 5000);
-                                this.particles.addFloatingText(this.width / 2, 70, '☁️ 已載入雲端水族箱！', '#00cec9', 16);
-                                if (window.soundCtrl) window.soundCtrl.playFanfare();
-                            } else if (syncRes.action === 'uploaded_local') {
-                                updateStatus('success', '✅', '已將目前水族箱進度備份至雲端！');
-                            }
-                        } catch (syncErr) {
-                            if (!isExtension) {
-                                console.warn('[Game] Auto sync notice:', syncErr);
-                            }
-                        } finally {
-                            this._isAutoSyncing = false;
-                            this._initialCloudSyncDone = true;
+                } else if (user && user.uid && !this._pendingExtensionSync && !this._isAutoSyncing) {
+                    this._isAutoSyncing = true;
+                    try {
+                        const syncRes = await Storage.syncWithCloud({ preferCloud: true });
+                        if (syncRes.action === 'loaded_cloud') {
+                            this.applyState(syncRes.state);
+                            this.state.lastCloudSyncTime = syncRes.state.lastCloudSyncTime || Date.now();
+                            updateStatus('success', '✅', '已同步載入您的雲端水族箱！');
+                            this.showToast('☁️ 已同步載入您的雲端水族箱！', 'success', 5000);
+                            this.particles.addFloatingText(this.width / 2, 70, '☁️ 已載入雲端水族箱！', '#00cec9', 16);
+                            if (window.soundCtrl) window.soundCtrl.playFanfare();
+                        } else if (syncRes.action === 'uploaded_local') {
+                            updateStatus('success', '✅', '已將目前水族箱進度備份至雲端！');
                         }
+                    } catch (syncErr) {
+                        const isExtension = (typeof window !== 'undefined' && window.location && window.location.protocol === 'chrome-extension:');
+                        if (!isExtension) {
+                            console.warn('[Game] Auto sync notice:', syncErr);
+                        }
+                    } finally {
+                        this._isAutoSyncing = false;
+                        this._initialCloudSyncDone = true;
                     }
                 }
             });

@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>摸魚水族館 - 放置養魚遊戲</title>
-    <link rel="stylesheet" href="popup.css?v=20261104_5">
+    <link rel="stylesheet" href="popup.css?v=20261104_6">
 </head>
 <body>
     <div class="aquarium-container">
@@ -556,6 +556,16 @@
                                 <span class="tool-desc">將當前魚缸進度上傳至 Google Firestore 雲端</span>
                             </div>
                         </button>
+                        <div style="display: flex; gap: 8px; margin-top: 6px;">
+                            <button id="forceDownloadCloudBtn" class="cloud-action-btn" style="flex: 1; padding: 8px;" disabled>
+                                <span class="btn-icon">⬇️</span>
+                                <span>從雲端下載</span>
+                            </button>
+                            <button id="forceUploadCloudBtn" class="cloud-action-btn" style="flex: 1; padding: 8px;" disabled>
+                                <span class="btn-icon">⬆️</span>
+                                <span>上傳至雲端</span>
+                            </button>
+                        </div>
                         <button id="exportSaveBtn" class="tool-btn export-btn">
                             <span class="tool-icon">📥</span>
                             <div class="tool-info">
@@ -623,11 +633,11 @@
     </div>
 
     <!-- Scripts -->
-    <script src="js/firebase-sync.js?v=20261104_5"></script>
-    <script src="js/storage.js?v=20261104_5"></script>
-    <script src="js/audio.js?v=20261104_5"></script>
-    <script src="js/particles.js?v=20261104_5"></script>
-    <script src="js/fish.js?v=20261104_5"></script>
-    <script src="js/game.js?v=20261104_5"></script>
+    <script src="js/firebase-sync.js?v=20261104_6"></script>
+    <script src="js/storage.js?v=20261104_6"></script>
+    <script src="js/audio.js?v=20261104_6"></script>
+    <script src="js/particles.js?v=20261104_6"></script>
+    <script src="js/fish.js?v=20261104_6"></script>
+    <script src="js/game.js?v=20261104_6"></script>
 </body>
 </html>

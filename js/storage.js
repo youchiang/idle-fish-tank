@@ -166,6 +166,8 @@ const Storage = {
         await this.saveLocalOnly(state);
 
         // 2. Throttle background cloud sync (at most once every 30 seconds)
+        if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+
         const now = Date.now();
         if (!this._lastBackgroundCloudSync) this._lastBackgroundCloudSync = 0;
 
@@ -173,15 +175,14 @@ const Storage = {
             if (!this._isSyncingCloud && !this.isInitialDefaultState(state)) {
                 if (window.FirebaseSync && typeof window.FirebaseSync.getCurrentUser === 'function') {
                     const user = window.FirebaseSync.getCurrentUser();
-                    if (user && typeof window.FirebaseSync.saveToCloud === 'function') {
+                    if (user && user.uid) {
                         this._lastBackgroundCloudSync = now;
-                        window.FirebaseSync.saveToCloud(state).then(res => {
-                            if (res && res.success && res.timestamp) {
-                                state.lastCloudSyncTime = res.timestamp;
-                                this.saveLocalOnly(state).catch(() => {});
+                        this.syncWithCloud().then(res => {
+                            if (res && res.action === 'loaded_cloud' && window.game && typeof window.game.applyState === 'function') {
+                                window.game.applyState(res.state);
                             }
                         }).catch(err => {
-                            console.warn('[Storage] Background cloud save notice:', err);
+                            console.warn('[Storage] Background cloud sync notice:', err);
                         });
                     }
                 }
@@ -337,15 +338,14 @@ const Storage = {
      * Intelligently resolves conflicts between local and cloud saves:
      * - If local is default empty state and cloud has progress -> FORCE adopt cloud!
      * - If local has real progress and cloud is default empty state -> FORCE upload local!
-     * - If cloud has higher progress score -> FORCE adopt cloud!
-     * - If local has higher progress score -> FORCE upload local!
-     * - If scores are equal and timestamps indicate cloud is newer -> adopt cloud!
-     * - Otherwise -> upload local to cloud.
+     * - When both are non-default tanks, uses timestamp comparison (cloudTime > localSyncTime + 1000)
+     *   so user actions on one device (Phone/PC) always propagate cleanly to other devices.
+     * - Rescues missing custom fish images in both directions so images are never lost.
      * @param {Object} [options={}]
      * @returns {Promise<{action: 'loaded_cloud'|'uploaded_local'|'no_change'|'error', state: Object, message: string}>}
      */
     async syncWithCloud(options = {}) {
-        if (!window.FirebaseSync || !window.FirebaseSync.getCurrentUser()) {
+        if (!window.FirebaseSync || !window.FirebaseSync.getCurrentUser() || !window.FirebaseSync.getCurrentUser().uid) {
             const local = await this.load();
             return { action: 'no_change', state: local, message: '未登入帳號，使用本機存檔' };
         }
@@ -359,13 +359,42 @@ const Storage = {
                 return { action: 'error', state: localState, message: cloudResult.error || '讀取雲端存檔失敗' };
             }
 
-            // Case 1: First time user on cloud (no cloud doc yet) -> upload local state
-            if (!cloudResult.exists || !cloudResult.data) {
+            const doUploadLocal = async (msg) => {
                 const saveRes = await window.FirebaseSync.saveToCloud(localState);
-                const syncTime = (saveRes && saveRes.timestamp) || Date.now();
+                if (!saveRes || !saveRes.success) {
+                    return {
+                        action: 'error',
+                        state: localState,
+                        message: (saveRes && (saveRes.error || saveRes.reason)) || '雲端寫入失敗'
+                    };
+                }
+                const syncTime = saveRes.timestamp || Date.now();
                 localState.lastCloudSyncTime = syncTime;
                 await this.saveLocalOnly(localState);
-                return { action: 'uploaded_local', state: localState, message: '雲端尚無存檔，已自動將本機進度同步至雲端！' };
+                if (typeof window !== 'undefined' && window.postMessage) {
+                    window.postMessage({ type: 'AF_SYNC_STATE_TO_EXT', state: localState }, '*');
+                }
+                return { action: 'uploaded_local', state: localState, message: msg };
+            };
+
+            const doAdoptCloud = async (msg, restoredImagesCount = 0) => {
+                cloudState.lastCloudSyncTime = cloudTime;
+                if (restoredImagesCount > 0 && window.FirebaseSync && typeof window.FirebaseSync.saveToCloud === 'function') {
+                    const repairRes = await window.FirebaseSync.saveToCloud(cloudState).catch(() => null);
+                    if (repairRes && repairRes.success && repairRes.timestamp) {
+                        cloudState.lastCloudSyncTime = repairRes.timestamp;
+                    }
+                }
+                await this.saveLocalOnly(cloudState);
+                if (typeof window !== 'undefined' && window.postMessage) {
+                    window.postMessage({ type: 'AF_SYNC_STATE_TO_EXT', state: cloudState }, '*');
+                }
+                return { action: 'loaded_cloud', state: cloudState, message: msg };
+            };
+
+            // Case 1: First time user on cloud (no cloud doc yet) -> upload local state
+            if (!cloudResult.exists || !cloudResult.data) {
+                return await doUploadLocal('雲端尚無存檔，已自動將本機進度同步至雲端！');
             }
 
             // Case 2: Smart comparison
@@ -373,96 +402,47 @@ const Storage = {
             const cloudTime = cloudResult.updatedAt || cloudState.lastCloudSyncTime || cloudState.lastSavedTime || 0;
             const localSyncTime = localState.lastCloudSyncTime || 0;
 
-            // Merge missing images in both directions to detect missing custom fish images
+            // Merge missing images in both directions to protect custom fish images
             const restoredToCloud = this.mergeMissingCustomImages(cloudState, localState);
             const restoredToLocal = this.mergeMissingCustomImages(localState, cloudState);
 
-            // If local had custom images that cloud was missing:
-            if (restoredToCloud.mergedCount > 0) {
-                console.log(`[Storage] Restored ${restoredToCloud.mergedCount} missing custom images from local to cloud! Force uploading to cloud.`);
-                localState.coins = Math.max(localState.coins || 0, cloudState.coins || 0);
-                if (!localState.stats) localState.stats = {};
-                localState.stats.totalCoinsEarned = Math.max(
-                    (localState.stats && localState.stats.totalCoinsEarned) || 0,
-                    (cloudState.stats && cloudState.stats.totalCoinsEarned) || 0,
-                    localState.coins
-                );
-                const saveRes = await window.FirebaseSync.saveToCloud(localState);
-                const syncTime = (saveRes && saveRes.timestamp) || Date.now();
-                localState.lastCloudSyncTime = syncTime;
-                await this.saveLocalOnly(localState);
-                return { action: 'uploaded_local', state: localState, message: `已成功將本機 ${restoredToCloud.mergedCount} 隻自訂小魚圖片同步備份至雲端！` };
+            console.log(`[Storage] Cloud sync check: cloudTime=${cloudTime}, localSyncTime=${localSyncTime}, restoredToCloud=${restoredToCloud.mergedCount}, restoredToLocal=${restoredToLocal.mergedCount}, preferCloud=${!!options.preferCloud}`);
+
+            // 1. Manual Force Upload (options.forceUpload === true)
+            if (options.forceUpload === true) {
+                return await doUploadLocal('已強制將本機魚缸備份至雲端！');
+            }
+
+            // 2. Manual Force Download (options.forceDownload === true)
+            if (options.forceDownload === true) {
+                return await doAdoptCloud('已強制從雲端載入最新魚缸存檔！', restoredToCloud.mergedCount);
             }
 
             const isLocalDefault = this.isInitialDefaultState(localState);
             const isCloudDefault = this.isInitialDefaultState(cloudState);
-            const localScore = this.getProgressScore(localState);
-            const cloudScore = this.getProgressScore(cloudState);
 
-            console.log(`[Storage] Cloud sync check: localScore=${localScore} (default=${isLocalDefault}, syncTime=${localSyncTime}), cloudScore=${cloudScore} (default=${isCloudDefault}, cloudTime=${cloudTime}), preferCloud=${!!options.preferCloud}`);
-
-            // 1. Force upload if requested
-            if (options.forceUpload === true) {
-                const saveRes = await window.FirebaseSync.saveToCloud(localState);
-                const syncTime = (saveRes && saveRes.timestamp) || Date.now();
-                localState.lastCloudSyncTime = syncTime;
-                await this.saveLocalOnly(localState);
-                return { action: 'uploaded_local', state: localState, message: '已強制將本機魚缸備份至雲端！' };
-            }
-
-            // 2. Force download if requested
-            if (options.forceDownload === true) {
-                cloudState.lastCloudSyncTime = cloudTime;
-                await this.saveLocalOnly(cloudState);
-                return { action: 'loaded_cloud', state: cloudState, message: '已強制同步下載雲端存檔！' };
-            }
-
-            // Conflict resolution priority:
-            // 1. Local is default empty state and cloud is NOT default -> FORCE adopt cloud!
+            // 3. Starter Tank Protection — Local is Default, Cloud is Non-Default
             if (isLocalDefault && !isCloudDefault) {
-                cloudState.lastCloudSyncTime = cloudTime;
-                await this.saveLocalOnly(cloudState);
-                return { action: 'loaded_cloud', state: cloudState, message: '本機為初始預設狀態，已成功自雲端載入您的水族箱！' };
+                return await doAdoptCloud('本機為初始預設狀態，已成功自雲端載入您的水族箱！', restoredToCloud.mergedCount);
             }
 
-            // 2. Local has progress and cloud is default -> FORCE upload local! (Never let a default cloud tank overwrite a non-default local tank!)
+            // 4. Starter Tank Protection — Local is Non-Default, Cloud is Default
             if (!isLocalDefault && isCloudDefault) {
-                const saveRes = await window.FirebaseSync.saveToCloud(localState);
-                const syncTime = (saveRes && saveRes.timestamp) || Date.now();
-                localState.lastCloudSyncTime = syncTime;
-                await this.saveLocalOnly(localState);
-                return { action: 'uploaded_local', state: localState, message: '偵測到雲端為初始狀態，已自動將本機魚缸備份至雲端！' };
+                return await doUploadLocal('偵測到雲端為初始狀態，已自動將本機魚缸備份至雲端！');
             }
 
-            // 3. Cloud progress score > local progress score -> FORCE adopt cloud!
-            if (cloudScore > localScore) {
-                cloudState.lastCloudSyncTime = cloudTime;
-                await this.saveLocalOnly(cloudState);
-                return { action: 'loaded_cloud', state: cloudState, message: '雲端進度較高，已成功同步下載雲端存檔！' };
+            // 5. Timestamp-Driven Sync for Non-Default Tanks (cloudTime > localSyncTime + 1000)
+            if (cloudTime > localSyncTime + 1000) {
+                return await doAdoptCloud('發現較新的雲端存檔，已自動同步載入！', restoredToCloud.mergedCount);
             }
 
-            // 4. Local progress score > cloud progress score -> FORCE upload local! (Never let a lower-progress cloud tank overwrite a higher-progress local tank!)
-            if (localScore > cloudScore) {
-                const saveRes = await window.FirebaseSync.saveToCloud(localState);
-                const syncTime = (saveRes && saveRes.timestamp) || Date.now();
-                localState.lastCloudSyncTime = syncTime;
-                await this.saveLocalOnly(localState);
-                return { action: 'uploaded_local', state: localState, message: '本機進度較高，已成功備份至雲端！' };
+            // 6. If Cloud was Missing Custom Images that Local Has
+            if (restoredToCloud.mergedCount > 0) {
+                return await doUploadLocal('已自動將本機自訂小魚圖片補齊至雲端！');
             }
 
-            // 5. Cloud progress score === local progress score AND cloud is newer -> adopt cloud
-            if (cloudScore === localScore && (cloudTime > localSyncTime + 2000)) {
-                cloudState.lastCloudSyncTime = cloudTime;
-                await this.saveLocalOnly(cloudState);
-                return { action: 'loaded_cloud', state: cloudState, message: '發現較新的雲端進度，已自動同步更新！' };
-            }
-
-            // 6. Otherwise -> upload local to cloud
-            const saveRes = await window.FirebaseSync.saveToCloud(localState);
-            const syncTime = (saveRes && saveRes.timestamp) || Date.now();
-            localState.lastCloudSyncTime = syncTime;
-            await this.saveLocalOnly(localState);
-            return { action: 'uploaded_local', state: localState, message: '本機進度已成功備份至雲端！' };
+            // 7. Otherwise (cloudTime <= localSyncTime + 1000) -> local is at or ahead
+            return await doUploadLocal('本機最新進度已同步備份至雲端！');
         } catch (err) {
             console.error('[Storage] syncWithCloud exception:', err);
             const local = await this.load();
@@ -605,11 +585,10 @@ if (typeof window !== 'undefined') {
 
             if (window.game && window.game.state) {
                 const restored = Storage.mergeMissingCustomImages(window.game.state, extState);
-                const extScore = Storage.getProgressScore(extState);
-                const gameScore = Storage.getProgressScore(window.game.state);
+                const isCurrentDefault = Storage.isInitialDefaultState(window.game.state);
 
-                if (event.data.isCloudSyncUrl || extScore >= gameScore || restored.mergedCount > 0) {
-                    console.log(`[Storage Bridge] Adopting full extension state (restored=${restored.mergedCount}, extScore=${extScore}, gameScore=${gameScore})`);
+                if (event.data.isCloudSyncUrl || isCurrentDefault) {
+                    console.log(`[Storage Bridge] Adopting full extension state (isCloudSyncUrl=${!!event.data.isCloudSyncUrl}, isCurrentDefault=${isCurrentDefault}, restored=${restored.mergedCount})`);
                     extState.coins = Math.max(extState.coins || 0, window.game.state.coins || 0);
                     if (window.game.state.stats) {
                         if (!extState.stats) extState.stats = {};
@@ -639,7 +618,9 @@ if (typeof window !== 'undefined') {
                         });
                     }
                 } else {
+                    // Non-cloud-sync normal web load: do NOT overwrite game.state, only rescue missing customImages!
                     if (restored.mergedCount > 0) {
+                        console.log(`[Storage Bridge] Rescued ${restored.mergedCount} custom images from extension into web state`);
                         await Storage.saveLocalOnly(window.game.state);
                         if (typeof window.game.applyState === 'function') {
                             window.game.applyState(window.game.state);
