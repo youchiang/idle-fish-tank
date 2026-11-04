@@ -48,13 +48,137 @@ class Game {
         this.myState = null;
         this.visitingTargetId = null;
 
+        // 擴充功能雲端同步暫存標記
+        this._pendingExtensionSync = null;
+        this._isSavingExtensionSync = false;
+
         this.init();
+    }
+
+    showToast(message, type = 'info', duration = 5000) {
+        let toast = document.getElementById('gameToast');
+        if (!toast) {
+            toast = document.createElement('div');
+            toast.id = 'gameToast';
+            toast.className = 'game-toast';
+            const container = document.querySelector('.aquarium-container');
+            if (container) {
+                container.appendChild(toast);
+            } else {
+                document.body.appendChild(toast);
+            }
+        }
+        toast.className = `game-toast ${type} show`;
+        toast.textContent = message;
+        if (this._toastTimer) clearTimeout(this._toastTimer);
+        this._toastTimer = setTimeout(() => {
+            toast.classList.remove('show');
+        }, duration);
+    }
+
+    handleCloudSyncHash() {
+        if (typeof window === 'undefined' || !window.location) return;
+
+        let hash = window.location.hash || '';
+        if (hash.startsWith('#')) hash = hash.substring(1);
+
+        let params = new URLSearchParams(hash);
+        if (!params.get('cloud_sync') && window.location.search) {
+            params = new URLSearchParams(window.location.search);
+        }
+
+        if (params.get('cloud_sync') === '1' && params.get('data')) {
+            const rawData = params.get('data');
+            let parsedState = null;
+            try {
+                parsedState = JSON.parse(rawData);
+            } catch (e1) {
+                try {
+                    const binary = atob(rawData);
+                    const bytes = Uint8Array.from(binary, c => c.charCodeAt(0));
+                    parsedState = JSON.parse(new TextDecoder().decode(bytes));
+                } catch (e2) {
+                    console.error('[CloudSync Bridge] Failed to parse data from hash:', e1, e2);
+                }
+            }
+
+            if (parsedState && typeof parsedState === 'object') {
+                const migrated = Storage.migrateState(parsedState);
+                migrated.lastSavedTime = Date.now();
+
+                try {
+                    localStorage.setItem('idleFishTankState', JSON.stringify(migrated));
+                    console.log('[CloudSync Bridge] Successfully imported extension state into localStorage:', migrated);
+                } catch (e) {
+                    console.warn('[CloudSync Bridge] localStorage save failed:', e);
+                }
+
+                this._pendingExtensionSync = migrated;
+
+                // Clear hash from URL cleanly (history.replaceState)
+                try {
+                    window.history.replaceState(null, '', window.location.pathname);
+                } catch (e) {
+                    console.warn('[CloudSync Bridge] replaceState error:', e);
+                }
+            }
+        }
+    }
+
+    async triggerExtensionSyncPrompt() {
+        if (!this._pendingExtensionSync) return;
+
+        const cloudModal = document.getElementById('cloudModal');
+        const updateStatus = (type, icon, text) => {
+            const banner = document.getElementById('cloudStatusBanner');
+            const iconEl = document.getElementById('cloudStatusIcon');
+            const textEl = document.getElementById('cloudStatusText');
+            if (banner && textEl) {
+                banner.className = `cloud-status-banner ${type}`;
+                if (iconEl) iconEl.textContent = icon;
+                textEl.textContent = text;
+            }
+        };
+
+        // Open Cloud Modal automatically
+        if (cloudModal) {
+            cloudModal.classList.remove('hidden');
+        }
+
+        const user = window.FirebaseSync ? window.FirebaseSync.getCurrentUser() : null;
+        if (user) {
+            // User already logged in -> save immediately to cloud!
+            updateStatus('loading', '🔄', '已連線 Google 帳號，正在自動將本機魚缸備份至 Firebase 雲端...');
+            const saveRes = await window.FirebaseSync.saveToCloud(this.state);
+            if (saveRes.success) {
+                const successMsg = '🎉 恭喜！已成功將擴充功能本機魚缸備份至 Firebase 雲端！未來在任何裝置登入均可同步此魚缸。';
+                updateStatus('success', '🎉', successMsg);
+                this.showToast(successMsg, 'success', 8000);
+                this.particles.addFloatingText(this.width / 2, 70, '🎉 雲端備份成功！', '#2ecc71', 18);
+                if (window.soundCtrl) window.soundCtrl.playFanfare();
+                this._pendingExtensionSync = null;
+            } else {
+                updateStatus('error', '❌', '雲端同步寫入失敗：' + (saveRes.error || '請點擊立即同步'));
+            }
+        } else {
+            // Not logged in -> Prompt user to click Google Login
+            const promptMsg = '已為您載入擴充功能魚缸存檔！請點擊上方「Google 一鍵登入」，即可將此存檔備份至 Firebase 雲端。';
+            updateStatus('info', '🐟', promptMsg);
+            this.showToast('📥 已成功載入擴充功能本機魚缸！請登入 Google 完成雲端備份。', 'info', 6000);
+            this.particles.addFloatingText(this.width / 2, 70, '📥 魚缸存檔已載入！', '#00cec9', 16);
+        }
     }
 
     async init() {
         try {
+            // 0. Check Extension Cloud Sync Hash (#cloud_sync=1&data=...)
+            this.handleCloudSyncHash();
+
             // 1. Load saved state
             this.state = await Storage.load();
+            if (this._pendingExtensionSync) {
+                this.state = this._pendingExtensionSync;
+            }
 
             // 2. Setup audio
             if (window.soundCtrl) {
@@ -90,7 +214,14 @@ class Game {
                 }, 400);
             }
 
-            // 10. Start main render & simulation loop
+            // 10. Check if extension state was imported via hash -> trigger cloud sync modal & prompt
+            if (this._pendingExtensionSync) {
+                setTimeout(() => {
+                    this.triggerExtensionSyncPrompt();
+                }, 300);
+            }
+
+            // 11. Start main render & simulation loop
             requestAnimationFrame((t) => this.loop(t));
         } catch (err) {
             console.error('Aquarium initialization error, launching fallback render loop:', err);
@@ -644,32 +775,89 @@ class Game {
                 if (user) {
                     updateStatus('info', '☁️', `雲端已連線，上次同步：${new Date(this.state.lastSavedTime || Date.now()).toLocaleTimeString()}`);
                 } else {
-                    updateStatus('info', 'ℹ️', '目前處於訪客模式（本機存檔）');
+                    const isExtension = (typeof chrome !== 'undefined' && chrome.tabs && typeof chrome.tabs.create === 'function') ||
+                                        (typeof window !== 'undefined' && window.location && window.location.protocol === 'chrome-extension:');
+                    if (isExtension) {
+                        updateStatus('info', 'ℹ️', '點擊下方「Google 一鍵登入」，將自動為您開啟新分頁並備份本機魚缸至雲端！');
+                    } else if (this._pendingExtensionSync) {
+                        updateStatus('info', '🐟', '已為您載入擴充功能魚缸存檔！請點擊上方「Google 一鍵登入」備份至雲端。');
+                    } else {
+                        updateStatus('info', 'ℹ️', '目前處於訪客模式（本機存檔）');
+                    }
                 }
             });
         }
 
         // Google Login
         if (googleLoginBtn) {
+            const isExtensionEnv = (typeof chrome !== 'undefined' && chrome.tabs && typeof chrome.tabs.create === 'function') ||
+                                   (typeof window !== 'undefined' && window.location && window.location.protocol === 'chrome-extension:');
+            if (isExtensionEnv) {
+                googleLoginBtn.innerHTML = '<span class="btn-icon">🌐</span> Google 一鍵登入同步至雲端';
+            }
+
             googleLoginBtn.addEventListener('click', async () => {
+                const isExtension = (typeof chrome !== 'undefined' && chrome.tabs && typeof chrome.tabs.create === 'function') ||
+                                    (typeof window !== 'undefined' && window.location && window.location.protocol === 'chrome-extension:');
+
+                if (isExtension) {
+                    this.saveState();
+                    const stateToSync = this.state || await Storage.load();
+                    updateStatus('loading', '🚀', '正在準備本機魚缸資料並開啟授權同步分頁...');
+
+                    try {
+                        const encodedData = encodeURIComponent(JSON.stringify(stateToSync));
+                        const targetUrl = `https://youchiang.github.io/idle-fish-tank/#cloud_sync=1&data=${encodedData}`;
+
+                        if (typeof chrome !== 'undefined' && chrome.tabs && typeof chrome.tabs.create === 'function') {
+                            chrome.tabs.create({ url: targetUrl });
+                        } else {
+                            window.open(targetUrl, '_blank');
+                        }
+
+                        updateStatus('success', '🚀', '已為您開啟 Google 授權分頁，登入完成後將自動將本機魚缸備份至雲端！');
+                        this.showToast('已為您開啟 Google 授權分頁，登入完成後將自動將本機魚缸備份至雲端！', 'info', 6000);
+                        this.particles.addFloatingText(this.width / 2, 70, '🚀 已開啟雲端備份分頁', '#00cec9', 16);
+                    } catch (err) {
+                        console.error('[CloudSync] Failed to open auth tab:', err);
+                        updateStatus('error', '❌', '開啟授權分頁失敗：' + (err.message || '未知錯誤'));
+                    }
+                    return;
+                }
+
                 if (!window.FirebaseSync) return;
                 updateStatus('loading', '⏳', '正在連接 Google 帳號中...');
                 const loginRes = await window.FirebaseSync.loginWithGoogle();
                 if (loginRes.success && loginRes.user) {
                     updateAuthUI(loginRes.user);
-                    updateStatus('loading', '🔄', '登入成功！正在智慧同步雲端存檔...');
 
-                    const syncRes = await Storage.syncWithCloud();
-                    if (syncRes.action === 'loaded_cloud') {
-                        this.applyState(syncRes.state);
-                        updateStatus('success', '✅', '成功自雲端下載最新水族箱進度！');
-                        this.particles.addFloatingText(this.width / 2, 70, '☁️ 雲端存檔同步成功！', '#00cec9', 16);
-                        if (window.soundCtrl) window.soundCtrl.playFanfare();
-                    } else if (syncRes.action === 'uploaded_local') {
-                        updateStatus('success', '✅', '已將目前水族箱進度成功備份至雲端！');
-                        this.particles.addFloatingText(this.width / 2, 70, '☁️ 本地進度已上傳雲端！', '#2ecc71', 16);
+                    if (this._pendingExtensionSync) {
+                        updateStatus('loading', '🔄', '登入成功！正在將擴充功能魚缸存檔寫入 Firebase 雲端...');
+                        const saveRes = await window.FirebaseSync.saveToCloud(this.state);
+                        if (saveRes.success) {
+                            const successMsg = '🎉 恭喜！已成功將擴充功能本機魚缸備份至 Firebase 雲端！未來在任何裝置登入均可同步此魚缸。';
+                            updateStatus('success', '🎉', successMsg);
+                            this.showToast(successMsg, 'success', 8000);
+                            this.particles.addFloatingText(this.width / 2, 70, '🎉 雲端備份成功！', '#2ecc71', 18);
+                            if (window.soundCtrl) window.soundCtrl.playFanfare();
+                            this._pendingExtensionSync = null;
+                        } else {
+                            updateStatus('error', '❌', '雲端同步寫入失敗：' + (saveRes.error || '請重試'));
+                        }
                     } else {
-                        updateStatus('success', '✅', syncRes.message || '雲端同步完成');
+                        updateStatus('loading', '🔄', '登入成功！正在智慧同步雲端存檔...');
+                        const syncRes = await Storage.syncWithCloud();
+                        if (syncRes.action === 'loaded_cloud') {
+                            this.applyState(syncRes.state);
+                            updateStatus('success', '✅', '成功自雲端下載最新水族箱進度！');
+                            this.particles.addFloatingText(this.width / 2, 70, '☁️ 雲端存檔同步成功！', '#00cec9', 16);
+                            if (window.soundCtrl) window.soundCtrl.playFanfare();
+                        } else if (syncRes.action === 'uploaded_local') {
+                            updateStatus('success', '✅', '已將目前水族箱進度成功備份至雲端！');
+                            this.particles.addFloatingText(this.width / 2, 70, '☁️ 本地進度已上傳雲端！', '#2ecc71', 16);
+                        } else {
+                            updateStatus('success', '✅', syncRes.message || '雲端同步完成');
+                        }
                     }
                 } else {
                     updateStatus('error', '❌', loginRes.error || '登入失敗，請確認網路連線');
@@ -753,8 +941,27 @@ class Game {
 
         // Listen for Firebase Auth state changes
         if (window.FirebaseSync && typeof window.FirebaseSync.onAuthStateChanged === 'function') {
-            window.FirebaseSync.onAuthStateChanged((user) => {
+            window.FirebaseSync.onAuthStateChanged(async (user) => {
                 updateAuthUI(user);
+                if (user && this._pendingExtensionSync && !this._isSavingExtensionSync) {
+                    this._isSavingExtensionSync = true;
+                    try {
+                        updateStatus('loading', '🔄', '偵測到 Google 帳號已登入，正在將擴充功能魚缸存檔寫入 Firebase 雲端...');
+                        const saveRes = await window.FirebaseSync.saveToCloud(this.state);
+                        if (saveRes.success) {
+                            const successMsg = '🎉 恭喜！已成功將擴充功能本機魚缸備份至 Firebase 雲端！未來在任何裝置登入均可同步此魚缸。';
+                            updateStatus('success', '🎉', successMsg);
+                            this.showToast(successMsg, 'success', 8000);
+                            this.particles.addFloatingText(this.width / 2, 70, '🎉 雲端備份成功！', '#2ecc71', 18);
+                            if (window.soundCtrl) window.soundCtrl.playFanfare();
+                            this._pendingExtensionSync = null;
+                        } else {
+                            updateStatus('error', '❌', '雲端同步寫入失敗：' + (saveRes.error || '請重試'));
+                        }
+                    } finally {
+                        this._isSavingExtensionSync = false;
+                    }
+                }
             });
         }
     }

@@ -64,6 +64,54 @@ const Storage = {
     },
 
     /**
+     * Inspect incoming cloud sync data from URL hash (#cloud_sync=1&data=...)
+     * Migrates format and writes directly to localStorage.
+     * @returns {Object|null}
+     */
+    checkIncomingHashSync() {
+        if (typeof window === 'undefined' || !window.location) return null;
+        try {
+            let hash = window.location.hash || '';
+            if (hash.startsWith('#')) hash = hash.substring(1);
+
+            let params = new URLSearchParams(hash);
+            if (!params.get('cloud_sync') && window.location.search) {
+                params = new URLSearchParams(window.location.search);
+            }
+
+            if (params.get('cloud_sync') === '1' && params.get('data')) {
+                const rawData = params.get('data');
+                let parsed = null;
+                try {
+                    parsed = JSON.parse(rawData);
+                } catch (e1) {
+                    try {
+                        const binary = atob(rawData);
+                        const bytes = Uint8Array.from(binary, c => c.charCodeAt(0));
+                        parsed = JSON.parse(new TextDecoder().decode(bytes));
+                    } catch (e2) {
+                        console.error('[Storage] Failed to decode hash sync state:', e1, e2);
+                    }
+                }
+
+                if (parsed && typeof parsed === 'object') {
+                    const migrated = this.migrateState(parsed);
+                    migrated.lastSavedTime = Date.now();
+                    try {
+                        localStorage.setItem('idleFishTankState', JSON.stringify(migrated));
+                    } catch (e) {
+                        console.warn('[Storage] localStorage save failed:', e);
+                    }
+                    return migrated;
+                }
+            }
+        } catch (e) {
+            console.warn('[Storage] checkIncomingHashSync notice:', e);
+        }
+        return null;
+    },
+
+    /**
      * Load game state from local storage (or chrome.storage.local)
      * @returns {Promise<Object>}
      */
@@ -80,6 +128,13 @@ const Storage = {
                     }
                 });
             } else {
+                // Check if incoming cloud sync data is in URL hash
+                const hashSyncState = this.checkIncomingHashSync();
+                if (hashSyncState) {
+                    resolve(hashSyncState);
+                    return;
+                }
+
                 try {
                     const saved = localStorage.getItem('idleFishTankState');
                     if (saved) {
