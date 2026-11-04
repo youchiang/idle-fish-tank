@@ -1800,3 +1800,23 @@ body.web-mode.tank-size-3 .aquarium-container {
     filter: brightness(1.15);
     transform: scale(1.04);
 }
+
+/* ========================================================
+   Embedded Iframe Mode (Chrome Extension Popup Shell)
+   ======================================================== */
+body.in-iframe {
+    padding: 0 !important;
+    justify-content: flex-start !important;
+    overflow: hidden !important;
+}
+
+body.in-iframe .web-header-title {
+    display: none !important;
+}
+
+body.in-iframe .aquarium-container {
+    border-radius: 0 !important;
+    border: none !important;
+    box-shadow: none !important;
+    max-width: 100% !important;
+}

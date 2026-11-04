@@ -281,3 +281,69 @@ const Storage = {
 };
 
 window.Storage = Storage;
+
+// Detect if running inside iframe container (e.g. Chrome Extension popup shell)
+if (window.self !== window.top) {
+    document.documentElement.classList.add('in-iframe');
+    if (document.body) {
+        document.body.classList.add('in-iframe');
+    } else {
+        window.addEventListener('DOMContentLoaded', () => {
+            document.body.classList.add('in-iframe');
+        });
+    }
+}
+
+// PostMessage bridge for migrating Chrome extension local data to GitHub Pages web app
+window.addEventListener('message', async (event) => {
+    if (!event.data || event.data.type !== 'IMPORT_EXTENSION_DATA') return;
+
+    try {
+        const incomingData = event.data.data;
+        if (incomingData && typeof incomingData === 'object') {
+            const state = Storage.migrateState(incomingData);
+
+            let shouldAdopt = true;
+            try {
+                const rawLocal = localStorage.getItem('idleFishTankState');
+                if (rawLocal) {
+                    const local = JSON.parse(rawLocal);
+                    const incomingCoins = (state.stats && state.stats.totalCoinsEarned) || state.coins || 0;
+                    const localCoins = (local.stats && local.stats.totalCoinsEarned) || local.coins || 0;
+                    const incomingTime = state.lastSavedTime || 0;
+                    const localTime = local.lastSavedTime || 0;
+
+                    // If local save is strictly newer AND has equal or more coins, keep current local save
+                    if (localTime > incomingTime && localCoins >= incomingCoins) {
+                        shouldAdopt = false;
+                    }
+                }
+            } catch (e) {
+                shouldAdopt = true;
+            }
+
+            if (shouldAdopt) {
+                localStorage.setItem('idleFishTankState', JSON.stringify(state));
+                console.log('[Storage Bridge] Successfully imported extension state into localStorage:', state);
+
+                if (window.game) {
+                    if (typeof window.game.applyState === 'function') {
+                        window.game.applyState(state);
+                    } else {
+                        window.game.state = state;
+                        if (typeof window.game.init === 'function') {
+                            window.game.init();
+                        }
+                    }
+                }
+            }
+        }
+
+        // Reply confirmation to parent window / extension popup
+        if (event.source && typeof event.source.postMessage === 'function') {
+            event.source.postMessage({ type: 'MIGRATION_SUCCESS' }, '*');
+        }
+    } catch (err) {
+        console.error('[Storage Bridge] Error processing IMPORT_EXTENSION_DATA:', err);
+    }
+});

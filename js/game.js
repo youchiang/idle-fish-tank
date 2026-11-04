@@ -566,6 +566,9 @@ class Game {
         this.fish = (this.state.fishList || []).map(fData => new Fish(fData, { width: this.width, height: this.height }));
         this.applyTankSize((this.state.upgrades && this.state.upgrades.tankSizeTier) || 1);
         this.updateHUD();
+        if (typeof this.updateTankIdUI === 'function') {
+            this.updateTankIdUI();
+        }
         if (window.soundCtrl) {
             window.soundCtrl.setEnabled(this.state.soundEnabled);
             this.updateSoundBtn();
