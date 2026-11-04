@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "摸魚水族館 - 放置養魚遊戲",
+  "version": "1.0.0",
+  "description": "上班摸魚放鬆必備！隨時點開投餵小魚、放置積累金幣、打造療癒的專屬水族箱。",
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    },
+    "default_title": "摸魚水族館"
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "permissions": [
+    "storage"
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; img-src 'self' https: data: blob:;"
+  }
+}
