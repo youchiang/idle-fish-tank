@@ -15,9 +15,7 @@ const FishImageCache = {
             return this.cache.get(src);
         }
         const img = new Image();
-        if (src.startsWith('http://') || src.startsWith('https://')) {
-            img.crossOrigin = 'anonymous';
-        }
+        // Do NOT set crossOrigin='anonymous' because canvas is not read via toDataURL and external CDNs without CORS would fail
         img.loaded = false;
         img.error = false;
         img.onload = () => { img.loaded = true; };
@@ -118,6 +116,9 @@ class Fish {
         this.species = FISH_SPECIES[this.speciesId] || FISH_SPECIES.clownfish;
         this.name = data.name || this.species.name;
         this.customImage = data.customImage || null; // Base64 or local image URL
+        if (this.customImage) {
+            FishImageCache.getImage(this.customImage);
+        }
         
         // Status attributes
         this.hunger = (data.hunger !== undefined) ? data.hunger : 80;

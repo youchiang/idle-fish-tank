@@ -7,7 +7,31 @@
 (function () {
     console.log('[FishTank Bridge] Content script initialized on https://youchiang.github.io/idle-fish-tank/');
 
-    // 1. Listen for postMessage from web page (Auth synchronization)
+    // Helper to deliver full extension state to web page
+    const checkAndDeliverExtensionState = () => {
+        try {
+            const hash = window.location.hash || '';
+            const search = window.location.search || '';
+            const isCloudSync = hash.includes('cloud_sync=1') || search.includes('cloud_sync=1') || !!window._wasCloudSyncUrl;
+
+            if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+                chrome.storage.local.get(['idleFishTankState', 'cloudUser'], (res) => {
+                    if (res && res.idleFishTankState) {
+                        console.log('[FishTank Bridge] Delivering full extension state to web app via postMessage (isCloudSync=' + isCloudSync + ')');
+                        window.postMessage({
+                            type: 'AF_FULL_EXTENSION_STATE',
+                            state: res.idleFishTankState,
+                            isCloudSyncUrl: isCloudSync
+                        }, '*');
+                    }
+                });
+            }
+        } catch (e) {
+            console.warn('[FishTank Bridge] Notice in checkAndDeliverExtensionState:', e);
+        }
+    };
+
+    // 1. Listen for postMessage from web page (Auth synchronization & state requests)
     window.addEventListener('message', (event) => {
         // Ensure message came from same window
         if (event.source !== window || !event.data) return;
@@ -30,35 +54,48 @@
                     console.log('[FishTank Bridge] cloudUser removed from chrome.storage.local');
                 });
             }
+        } else if (event.data.type === 'AF_REQUEST_EXTENSION_STATE') {
+            console.log('[FishTank Bridge] Received AF_REQUEST_EXTENSION_STATE, delivering extension state...');
+            checkAndDeliverExtensionState();
+        } else if (event.data.type === 'AF_SYNC_STATE_TO_EXT' && event.data.state) {
+            console.log('[FishTank Bridge] Received AF_SYNC_STATE_TO_EXT, merging missing images and saving...');
+            if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+                chrome.storage.local.get(['idleFishTankState'], (res) => {
+                    const existing = res ? res.idleFishTankState : null;
+                    let target = event.data.state;
+                    if (existing && existing.fishList && target && target.fishList) {
+                        for (const tf of target.fishList) {
+                            if (!tf.customImage) {
+                                const df = existing.fishList.find(f => f.id === tf.id) ||
+                                           existing.fishList.find(f => f.speciesId === 'custom' && f.name === tf.name && f.customImage);
+                                if (df && df.customImage) {
+                                    tf.customImage = df.customImage;
+                                }
+                            }
+                        }
+                    }
+                    if (existing && existing.decorations && existing.decorations.customDecorations && target && target.decorations && target.decorations.customDecorations) {
+                        for (const td of target.decorations.customDecorations) {
+                            if (!td.imageUrl) {
+                                const dd = existing.decorations.customDecorations.find(d => d.id === td.id);
+                                if (dd && dd.imageUrl) {
+                                    td.imageUrl = dd.imageUrl;
+                                }
+                            }
+                        }
+                    }
+                    chrome.storage.local.set({ idleFishTankState: target }, () => {
+                        console.log('[FishTank Bridge] Successfully synced updated state into extension chrome.storage.local');
+                    });
+                });
+            }
         }
     });
 
-    // 2. If launched with cloud_sync flag, deliver full uncropped extension state to web page
-    const checkAndDeliverExtensionState = () => {
-        try {
-            const hash = window.location.hash || '';
-            const search = window.location.search || '';
-            const isCloudSync = hash.includes('cloud_sync=1') || search.includes('cloud_sync=1');
-
-            if (isCloudSync && typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-                chrome.storage.local.get(['idleFishTankState'], (res) => {
-                    if (res && res.idleFishTankState) {
-                        console.log('[FishTank Bridge] Delivering full extension state to web app via postMessage');
-                        window.postMessage({
-                            type: 'AF_FULL_EXTENSION_STATE',
-                            state: res.idleFishTankState
-                        }, '*');
-                    }
-                });
-            }
-        } catch (e) {
-            console.warn('[FishTank Bridge] Notice in checkAndDeliverExtensionState:', e);
-        }
-    };
-
-    // Run immediately and also upon DOMContentLoaded
+    // 2. Deliver full extension state to web page (immediately, on DOM ready, and after 500ms)
     checkAndDeliverExtensionState();
     if (document.readyState === 'loading') {
         window.addEventListener('DOMContentLoaded', checkAndDeliverExtensionState, { once: true });
     }
+    setTimeout(checkAndDeliverExtensionState, 500);
 })();

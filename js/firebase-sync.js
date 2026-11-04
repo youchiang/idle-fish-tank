@@ -228,7 +228,7 @@ const FirebaseSync = {
             headers['Authorization'] = `Bearer ${token}`;
         }
 
-        let resp = await fetch(url, { ...options, headers });
+        let resp = await fetch(url, { ...options, cache: 'no-store', headers });
 
         // If unauthorized/forbidden and refresh token exists, force refresh and retry once
         const hasRefreshToken = this.currentUser && (
@@ -241,7 +241,7 @@ const FirebaseSync = {
             token = await this._getValidRestToken(true);
             if (token) {
                 headers['Authorization'] = `Bearer ${token}`;
-                resp = await fetch(url, { ...options, headers });
+                resp = await fetch(url, { ...options, cache: 'no-store', headers });
             }
         }
 
@@ -571,15 +571,16 @@ const FirebaseSync = {
      * Compress Base64 image data URL to lightweight WebP/JPEG format
      * @param {string} dataUrl
      * @param {number} [maxDim=140]
-     * @param {number} [quality=0.75]
+     * @param {number} [quality=0.78]
      * @returns {Promise<string>}
      */
-    async compressBase64Image(dataUrl, maxDim = 140, quality = 0.75) {
+    async compressBase64Image(dataUrl, maxDim = 140, quality = 0.78) {
         if (!dataUrl || typeof dataUrl !== 'string') return '';
-        if (!dataUrl.startsWith('data:image/')) {
-            return dataUrl.length > 15000 ? '' : dataUrl;
+        if (!dataUrl.startsWith('data:')) {
+            // Keep external http/https and relative URLs intact
+            return dataUrl;
         }
-        if (dataUrl.length <= 18000) {
+        if (dataUrl.length <= 22000) {
             return dataUrl;
         }
 
@@ -590,9 +591,10 @@ const FirebaseSync = {
                 const timer = setTimeout(() => {
                     if (!resolved) {
                         resolved = true;
-                        resolve('');
+                        // On timeout: keep image if within reasonable 150KB bound
+                        resolve(dataUrl.length <= 150000 ? dataUrl : '');
                     }
-                }, 1500);
+                }, 4000);
 
                 const img = new Image();
                 img.onload = () => {
@@ -623,9 +625,9 @@ const FirebaseSync = {
                             }
                         }
 
-                        // If resulting string is still > 30000 chars, retry with smaller dimensions
-                        if (resUrl.length > 30000) {
-                            const smallMaxDim = 80;
+                        // Step 1 reduction if > 45000 chars: scale down to 96x96
+                        if (resUrl.length > 45000) {
+                            const smallMaxDim = 96;
                             const sSide = Math.max(img.naturalWidth || 1, img.naturalHeight || 1);
                             const sScale = Math.min(1, smallMaxDim / sSide);
                             const sw = Math.max(1, Math.round((img.naturalWidth || smallMaxDim) * sScale));
@@ -634,23 +636,37 @@ const FirebaseSync = {
                             canvas.height = sh;
                             ctx.clearRect(0, 0, sw, sh);
                             ctx.drawImage(img, 0, 0, sw, sh);
-                            resUrl = canvas.toDataURL('image/webp', 0.6);
+                            resUrl = canvas.toDataURL('image/webp', 0.65);
                             if (!resUrl.startsWith('data:image/webp')) {
-                                resUrl = canvas.toDataURL('image/jpeg', 0.6);
+                                resUrl = canvas.toDataURL('image/jpeg', 0.65);
+                            }
+                        }
+
+                        // Step 2 reduction if STILL > 45000 chars: scale down to 64x64
+                        if (resUrl.length > 45000) {
+                            const tinyMaxDim = 64;
+                            const tSide = Math.max(img.naturalWidth || 1, img.naturalHeight || 1);
+                            const tScale = Math.min(1, tinyMaxDim / tSide);
+                            const tw = Math.max(1, Math.round((img.naturalWidth || tinyMaxDim) * tScale));
+                            const th = Math.max(1, Math.round((img.naturalHeight || tinyMaxDim) * tScale));
+                            canvas.width = tw;
+                            canvas.height = th;
+                            ctx.clearRect(0, 0, tw, th);
+                            ctx.drawImage(img, 0, 0, tw, th);
+                            resUrl = canvas.toDataURL('image/webp', 0.5);
+                            if (!resUrl.startsWith('data:image/webp')) {
+                                resUrl = canvas.toDataURL('image/jpeg', 0.5);
                             }
                         }
 
                         resolved = true;
                         clearTimeout(timer);
-                        if (resUrl.length > 35000) {
-                            resolve('');
-                        } else {
-                            resolve(resUrl);
-                        }
+                        // NEVER resolve empty if resUrl was created!
+                        resolve(resUrl || (dataUrl.length <= 150000 ? dataUrl : ''));
                     } catch (e) {
                         resolved = true;
                         clearTimeout(timer);
-                        resolve('');
+                        resolve(dataUrl.length <= 150000 ? dataUrl : '');
                     }
                 };
 
@@ -658,7 +674,7 @@ const FirebaseSync = {
                     if (!resolved) {
                         resolved = true;
                         clearTimeout(timer);
-                        resolve('');
+                        resolve(dataUrl.length <= 150000 ? dataUrl : '');
                     }
                 };
 
@@ -667,7 +683,7 @@ const FirebaseSync = {
         }
 
         // Non-browser or headless environment without DOM
-        return dataUrl.length > 18000 ? '' : dataUrl;
+        return dataUrl.length > 150000 ? '' : dataUrl;
     },
 
     /**
@@ -683,11 +699,11 @@ const FirebaseSync = {
         if (Array.isArray(cleanState.fishList)) {
             for (let i = 0; i < cleanState.fishList.length; i++) {
                 const fish = cleanState.fishList[i];
-                if (fish && fish.customImage && fish.customImage.length > 18000) {
-                    const compressed = await this.compressBase64Image(fish.customImage, 140, 0.75);
+                if (fish && fish.customImage && fish.customImage.length > 22000) {
+                    const compressed = await this.compressBase64Image(fish.customImage, 140, 0.78);
                     if (compressed) {
                         fish.customImage = compressed;
-                    } else {
+                    } else if (fish.customImage.length > 120000) {
                         delete fish.customImage;
                     }
 
@@ -706,11 +722,11 @@ const FirebaseSync = {
         if (cleanState.decorations && Array.isArray(cleanState.decorations.customDecorations)) {
             for (let i = 0; i < cleanState.decorations.customDecorations.length; i++) {
                 const decor = cleanState.decorations.customDecorations[i];
-                if (decor && decor.imageUrl && decor.imageUrl.length > 18000) {
-                    const compressed = await this.compressBase64Image(decor.imageUrl, 160, 0.75);
+                if (decor && decor.imageUrl && decor.imageUrl.length > 22000) {
+                    const compressed = await this.compressBase64Image(decor.imageUrl, 160, 0.78);
                     if (compressed) {
                         decor.imageUrl = compressed;
-                    } else {
+                    } else if (decor.imageUrl.length > 120000) {
                         delete decor.imageUrl;
                     }
 
@@ -726,9 +742,13 @@ const FirebaseSync = {
         }
 
         // 3. Compress eventSettings customHandUrl
-        if (cleanState.eventSettings && cleanState.eventSettings.customHandUrl && cleanState.eventSettings.customHandUrl.length > 18000) {
-            const compressed = await this.compressBase64Image(cleanState.eventSettings.customHandUrl, 140, 0.75);
-            cleanState.eventSettings.customHandUrl = compressed || '';
+        if (cleanState.eventSettings && cleanState.eventSettings.customHandUrl && cleanState.eventSettings.customHandUrl.length > 22000) {
+            const compressed = await this.compressBase64Image(cleanState.eventSettings.customHandUrl, 140, 0.78);
+            if (compressed) {
+                cleanState.eventSettings.customHandUrl = compressed;
+            } else if (cleanState.eventSettings.customHandUrl.length > 120000) {
+                cleanState.eventSettings.customHandUrl = '';
+            }
             if (gameState && gameState.eventSettings) {
                 gameState.eventSettings.customHandUrl = cleanState.eventSettings.customHandUrl;
             }
@@ -741,7 +761,7 @@ const FirebaseSync = {
             console.warn(`[FirebaseSync] CleanState exceeds ${HARD_CAP} bytes (${serializedLen}), stripping large image data...`);
             if (Array.isArray(cleanState.fishList)) {
                 for (const fish of cleanState.fishList) {
-                    if (fish.customImage && fish.customImage.length > 5000) {
+                    if (fish.customImage && fish.customImage.length > 8000) {
                         delete fish.customImage;
                         if (JSON.stringify(cleanState).length <= HARD_CAP) break;
                     }
@@ -749,13 +769,13 @@ const FirebaseSync = {
             }
             if (JSON.stringify(cleanState).length > HARD_CAP && cleanState.decorations && Array.isArray(cleanState.decorations.customDecorations)) {
                 for (const decor of cleanState.decorations.customDecorations) {
-                    if (decor.imageUrl && decor.imageUrl.length > 5000) {
+                    if (decor.imageUrl && decor.imageUrl.length > 8000) {
                         delete decor.imageUrl;
                         if (JSON.stringify(cleanState).length <= HARD_CAP) break;
                     }
                 }
             }
-            if (JSON.stringify(cleanState).length > HARD_CAP && cleanState.eventSettings && cleanState.eventSettings.customHandUrl && cleanState.eventSettings.customHandUrl.length > 5000) {
+            if (JSON.stringify(cleanState).length > HARD_CAP && cleanState.eventSettings && cleanState.eventSettings.customHandUrl && cleanState.eventSettings.customHandUrl.length > 8000) {
                 cleanState.eventSettings.customHandUrl = '';
             }
         }

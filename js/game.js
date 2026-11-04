@@ -118,6 +118,8 @@ class Game {
 
                 // Clear hash from URL cleanly (history.replaceState)
                 try {
+                    window._wasCloudSyncUrl = true;
+                    window.postMessage({ type: 'AF_REQUEST_EXTENSION_STATE' }, '*');
                     window.history.replaceState(null, '', window.location.pathname);
                 } catch (e) {
                     console.warn('[CloudSync Bridge] replaceState error:', e);
@@ -187,7 +189,7 @@ class Game {
 
         const isOverlongBase64 = (val) => {
             if (typeof val !== 'string') return false;
-            return val.length > 8000;
+            return val.length > 25000;
         };
 
         // 1. Sanitize fishList: preserve vital stats (coins, levels, species, hunger, growth, etc.)
@@ -217,9 +219,9 @@ class Game {
             clean.eventSettings.customHandUrl = '';
         }
 
-        // 4. Ensure total encoded payload is strictly under 15KB safe browser threshold (~14500 chars)
+        // 4. Ensure total encoded payload is under browser safe limit (~120KB)
         let encoded = encodeURIComponent(JSON.stringify(clean));
-        const MAX_SAFE_URL_PAYLOAD = 14500;
+        const MAX_SAFE_URL_PAYLOAD = 120000;
         if (encoded.length > MAX_SAFE_URL_PAYLOAD) {
             console.warn('[CloudSync] Encoded state payload exceeds safe size, stripping remaining non-critical image data...');
             if (Array.isArray(clean.fishList)) {
@@ -238,6 +240,11 @@ class Game {
 
     async init() {
         try {
+            // Request extension state if running on web (restores missing custom images from extension)
+            if (typeof window !== 'undefined' && window.location && window.location.protocol !== 'chrome-extension:') {
+                window.postMessage({ type: 'AF_REQUEST_EXTENSION_STATE' }, '*');
+            }
+
             // 0. Check Extension Cloud Sync Hash (#cloud_sync=1&data=...)
             this.handleCloudSyncHash();
 
@@ -582,9 +589,7 @@ class Game {
             statusText.className = 'custom-status-text loading';
 
             const testImg = new Image();
-            if (src.startsWith('http://') || src.startsWith('https://')) {
-                testImg.crossOrigin = 'anonymous';
-            }
+            // Do not force crossOrigin anonymous so images from CDNs without CORS headers load cleanly
             testImg.onload = () => {
                 this.selectedUploadImage = src;
                 previewImg.src = src;
@@ -886,6 +891,9 @@ class Game {
                     updateStatus('loading', '🚀', '正在準備本機魚缸資料並開啟授權同步分頁...');
 
                     try {
+                        if (window.FirebaseSync && typeof window.FirebaseSync.prepareStateForFirestore === 'function') {
+                            await window.FirebaseSync.prepareStateForFirestore(stateToSync);
+                        }
                         const payload = this.sanitizeStateForCloudUrl(stateToSync);
                         const encodedData = encodeURIComponent(JSON.stringify(payload));
                         const targetUrl = `https://youchiang.github.io/idle-fish-tank/#cloud_sync=1&data=${encodedData}`;
@@ -979,26 +987,32 @@ class Game {
                     updateStatus('error', '⚠️', '請先登入 Google 帳號後再進行同步');
                     return;
                 }
-                updateStatus('loading', '⏳', '正在同步魚缸進度至雲端...');
+                updateStatus('loading', '⏳', '正在智慧同步魚缸進度至雲端...');
                 if (window.FirebaseSync && typeof window.FirebaseSync.prepareStateForFirestore === 'function') {
                     await window.FirebaseSync.prepareStateForFirestore(this.state);
                 }
                 this.saveState();
-                const saveRes = await window.FirebaseSync.saveToCloud(this.state);
-                if (saveRes.success) {
-                    const syncTime = saveRes.timestamp || Date.now();
-                    this.state.lastCloudSyncTime = syncTime;
-                    await Storage.saveLocalOnly(this.state);
+
+                const syncRes = await Storage.syncWithCloud({ preferCloud: true });
+                if (syncRes.action === 'loaded_cloud') {
+                    this.applyState(syncRes.state);
+                    const syncTime = syncRes.state.lastCloudSyncTime || Date.now();
                     const timeStr = new Date(syncTime).toLocaleTimeString();
-                    updateStatus('success', '✅', `雲端存檔已同步成功！(${timeStr})`);
+                    updateStatus('success', '✅', `已同步載入雲端最新魚缸！(${timeStr})`);
                     this.particles.addFloatingText(this.width / 2, 70, '☁️ 雲端進度已即時更新！', '#00cec9', 16);
                     if (window.soundCtrl) window.soundCtrl.playCoinSound();
-                } else {
+                } else if (syncRes.action === 'uploaded_local') {
+                    this.applyState(syncRes.state);
+                    const syncTime = syncRes.state.lastCloudSyncTime || Date.now();
+                    const timeStr = new Date(syncTime).toLocaleTimeString();
+                    updateStatus('success', '✅', `雲端存檔已同步更新！(${timeStr})`);
+                    this.particles.addFloatingText(this.width / 2, 70, '☁️ 本地魚缸已備份至雲端！', '#2ecc71', 16);
+                    if (window.soundCtrl) window.soundCtrl.playCoinSound();
+                } else if (syncRes.action === 'error') {
                     const isExtension = (typeof window !== 'undefined' && window.location && window.location.protocol === 'chrome-extension:') ||
                                         (typeof chrome !== 'undefined' && chrome.tabs && typeof chrome.tabs.create === 'function');
-                    const errStr = String(saveRes.error || saveRes.reason || '');
-                    const isAuthOrPermError = saveRes.reason === 'unauthenticated' ||
-                                              errStr.includes('401') ||
+                    const errStr = String(syncRes.message || '');
+                    const isAuthOrPermError = errStr.includes('401') ||
                                               errStr.includes('403') ||
                                               errStr.includes('unauthenticated') ||
                                               errStr.includes('PERMISSION_DENIED') ||
@@ -1007,6 +1021,9 @@ class Game {
                     if (isExtension && isAuthOrPermError) {
                         updateStatus('loading', '🚀', 'REST 直連需要重新授權，正在開啟網頁版同步分頁...');
                         try {
+                            if (window.FirebaseSync && typeof window.FirebaseSync.prepareStateForFirestore === 'function') {
+                                await window.FirebaseSync.prepareStateForFirestore(this.state);
+                            }
                             const payload = this.sanitizeStateForCloudUrl(this.state);
                             const encodedData = encodeURIComponent(JSON.stringify(payload));
                             const targetUrl = `https://youchiang.github.io/idle-fish-tank/#cloud_sync=1&data=${encodedData}`;
@@ -1016,10 +1033,35 @@ class Game {
                                 window.open(targetUrl, '_blank');
                             }
                         } catch (tabErr) {
-                            updateStatus('error', '❌', `雲端儲存失敗：${saveRes.error || saveRes.reason || '請檢查網路'}`);
+                            updateStatus('error', '❌', `雲端儲存失敗：${syncRes.message || '請檢查網路'}`);
                         }
                     } else {
-                        updateStatus('error', '❌', `雲端儲存失敗：${saveRes.error || saveRes.reason || '請檢查網路'}`);
+                        updateStatus('error', '❌', `雲端儲存失敗：${syncRes.message || '請檢查網路'}`);
+                    }
+                } else {
+                    updateStatus('success', '✅', syncRes.message || '雲端同步完成');
+                }
+            });
+        }
+
+        // Auto sync on tab focus / visibility change (Web app)
+        if (typeof document !== 'undefined' && document.addEventListener) {
+            document.addEventListener('visibilitychange', async () => {
+                if (document.visibilityState === 'visible') {
+                    const isExtension = (typeof window !== 'undefined' && window.location && window.location.protocol === 'chrome-extension:');
+                    if (!isExtension && window.FirebaseSync && window.FirebaseSync.getCurrentUser() && !this._isAutoSyncing) {
+                        this._isAutoSyncing = true;
+                        try {
+                            const syncRes = await Storage.syncWithCloud({ preferCloud: true });
+                            if (syncRes.action === 'loaded_cloud') {
+                                this.applyState(syncRes.state);
+                                this.showToast('☁️ 已從雲端同步最新魚缸進度！', 'info', 4000);
+                            }
+                        } catch (e) {
+                            console.warn('[Game] Tab focus sync notice:', e);
+                        } finally {
+                            this._isAutoSyncing = false;
+                        }
                     }
                 }
             });

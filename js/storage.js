@@ -241,11 +241,62 @@ const Storage = {
     },
 
     /**
+     * Merge missing custom images (fish customImage, customDecorations imageUrl, customHandUrl)
+     * from a donor state into a target state.
+     * @param {Object} targetState
+     * @param {Object} donorState
+     * @returns {{ mergedCount: number }}
+     */
+    mergeMissingCustomImages(targetState, donorState) {
+        let mergedCount = 0;
+        if (!targetState || !donorState) return { mergedCount: 0 };
+
+        // 1. Merge fish customImage
+        if (Array.isArray(targetState.fishList) && Array.isArray(donorState.fishList)) {
+            for (const tf of targetState.fishList) {
+                if (!tf.customImage || String(tf.customImage).trim() === '') {
+                    // Match by ID first, or by name and species
+                    const df = donorState.fishList.find(f => f && f.id === tf.id && f.customImage) ||
+                               donorState.fishList.find(f => f && f.speciesId === 'custom' && f.name === tf.name && f.customImage);
+                    if (df && df.customImage) {
+                        tf.customImage = df.customImage;
+                        mergedCount++;
+                    }
+                }
+            }
+        }
+
+        // 2. Merge custom decorations imageUrl
+        if (targetState.decorations && Array.isArray(targetState.decorations.customDecorations) &&
+            donorState.decorations && Array.isArray(donorState.decorations.customDecorations)) {
+            for (const td of targetState.decorations.customDecorations) {
+                if (!td.imageUrl || String(td.imageUrl).trim() === '') {
+                    const dd = donorState.decorations.customDecorations.find(d => d && d.id === td.id && d.imageUrl);
+                    if (dd && dd.imageUrl) {
+                        td.imageUrl = dd.imageUrl;
+                        mergedCount++;
+                    }
+                }
+            }
+        }
+
+        // 3. Merge custom hand URL
+        if (targetState.eventSettings && donorState.eventSettings) {
+            if (!targetState.eventSettings.customHandUrl && donorState.eventSettings.customHandUrl) {
+                targetState.eventSettings.customHandUrl = donorState.eventSettings.customHandUrl;
+                mergedCount++;
+            }
+        }
+
+        return { mergedCount };
+    },
+
+    /**
      * Calculate progress score for an aquarium state
      * Formula:
      * (tankSizeTier - 1) * 10000 + (tankCapacityTier - 1) * 5000 + upgradeBonus + (fishList.length) * 1000 +
      * (customDecorations.length) * 500 + (coral ? 500 : 0) + (sunkenCastle ? 500 : 0) +
-     * (stats.totalCoinsEarned || coins || 0)
+     * coinScore + customImgBonus
      * @param {Object} state
      * @returns {number}
      */
@@ -263,9 +314,12 @@ const Storage = {
         const sunkenCastle = !!dec.sunkenCastle;
 
         const stats = state.stats || {};
-        const coinScore = (typeof stats.totalCoinsEarned === 'number' && stats.totalCoinsEarned > 0)
-            ? stats.totalCoinsEarned
-            : (typeof state.coins === 'number' ? state.coins : 0);
+        const totalCoins = (typeof stats.totalCoinsEarned === 'number') ? stats.totalCoinsEarned : 0;
+        const currentCoins = (typeof state.coins === 'number') ? state.coins : 0;
+        const coinScore = Math.max(totalCoins, currentCoins);
+
+        const customImgCount = fishList.filter(f => f && f.customImage && String(f.customImage).length > 5).length;
+        const customImgBonus = customImgCount * 25000;
 
         return ((tankSizeTier - 1) * 10000) +
                ((tankCapacityTier - 1) * 5000) +
@@ -274,7 +328,8 @@ const Storage = {
                (customDecorations.length * 500) +
                (coral ? 500 : 0) +
                (sunkenCastle ? 500 : 0) +
-               coinScore;
+               coinScore +
+               customImgBonus;
     },
 
     /**
@@ -317,6 +372,27 @@ const Storage = {
             const cloudState = this.migrateState(cloudResult.data);
             const cloudTime = cloudResult.updatedAt || cloudState.lastCloudSyncTime || cloudState.lastSavedTime || 0;
             const localSyncTime = localState.lastCloudSyncTime || 0;
+
+            // Merge missing images in both directions to detect missing custom fish images
+            const restoredToCloud = this.mergeMissingCustomImages(cloudState, localState);
+            const restoredToLocal = this.mergeMissingCustomImages(localState, cloudState);
+
+            // If local had custom images that cloud was missing:
+            if (restoredToCloud.mergedCount > 0) {
+                console.log(`[Storage] Restored ${restoredToCloud.mergedCount} missing custom images from local to cloud! Force uploading to cloud.`);
+                localState.coins = Math.max(localState.coins || 0, cloudState.coins || 0);
+                if (!localState.stats) localState.stats = {};
+                localState.stats.totalCoinsEarned = Math.max(
+                    (localState.stats && localState.stats.totalCoinsEarned) || 0,
+                    (cloudState.stats && cloudState.stats.totalCoinsEarned) || 0,
+                    localState.coins
+                );
+                const saveRes = await window.FirebaseSync.saveToCloud(localState);
+                const syncTime = (saveRes && saveRes.timestamp) || Date.now();
+                localState.lastCloudSyncTime = syncTime;
+                await this.saveLocalOnly(localState);
+                return { action: 'uploaded_local', state: localState, message: `已成功將本機 ${restoredToCloud.mergedCount} 隻自訂小魚圖片同步備份至雲端！` };
+            }
 
             const isLocalDefault = this.isInitialDefaultState(localState);
             const isCloudDefault = this.isInitialDefaultState(cloudState);
@@ -520,30 +596,63 @@ if (typeof window !== 'undefined') {
     // Handle full state delivered from extension content script bridge
     if (event.data.type === 'AF_FULL_EXTENSION_STATE' && event.data.state) {
         try {
-            console.log('[Storage Bridge] Received AF_FULL_EXTENSION_STATE from content script');
-            let state = Storage.migrateState(event.data.state);
+            console.log('[Storage Bridge] Received AF_FULL_EXTENSION_STATE from content script (isCloudSyncUrl=' + !!event.data.isCloudSyncUrl + ')');
+            let extState = Storage.migrateState(event.data.state);
             if (window.FirebaseSync && typeof window.FirebaseSync.prepareStateForFirestore === 'function') {
-                state = await window.FirebaseSync.prepareStateForFirestore(state);
+                extState = await window.FirebaseSync.prepareStateForFirestore(extState);
             }
-            state.lastSavedTime = Date.now();
-            window._pendingFullExtensionState = state;
-            await Storage.saveLocalOnly(state);
+            extState.lastSavedTime = Date.now();
 
-            if (window.game) {
-                window.game._pendingExtensionSync = state;
-                window.game.state = state;
-                if (typeof window.game.applyState === 'function') {
-                    window.game.applyState(state);
-                }
-                const user = window.FirebaseSync ? window.FirebaseSync.getCurrentUser() : null;
-                if (user && typeof window.FirebaseSync.saveToCloud === 'function') {
-                    window.FirebaseSync.saveToCloud(state).then(res => {
-                        if (res && res.success) {
-                            window.game.showToast('🎉 已成功將擴充功能完整魚缸同步至雲端！', 'success', 6000);
-                            window.game._pendingExtensionSync = null;
+            if (window.game && window.game.state) {
+                const restored = Storage.mergeMissingCustomImages(window.game.state, extState);
+                const extScore = Storage.getProgressScore(extState);
+                const gameScore = Storage.getProgressScore(window.game.state);
+
+                if (event.data.isCloudSyncUrl || extScore >= gameScore || restored.mergedCount > 0) {
+                    console.log(`[Storage Bridge] Adopting full extension state (restored=${restored.mergedCount}, extScore=${extScore}, gameScore=${gameScore})`);
+                    extState.coins = Math.max(extState.coins || 0, window.game.state.coins || 0);
+                    if (window.game.state.stats) {
+                        if (!extState.stats) extState.stats = {};
+                        extState.stats.totalCoinsEarned = Math.max(
+                            extState.stats.totalCoinsEarned || 0,
+                            window.game.state.stats.totalCoinsEarned || 0,
+                            extState.coins
+                        );
+                    }
+                    Storage.mergeMissingCustomImages(extState, window.game.state);
+
+                    window._pendingFullExtensionState = extState;
+                    window.game._pendingExtensionSync = extState;
+                    window.game.state = extState;
+                    await Storage.saveLocalOnly(extState);
+                    if (typeof window.game.applyState === 'function') {
+                        window.game.applyState(extState);
+                    }
+
+                    const user = window.FirebaseSync ? window.FirebaseSync.getCurrentUser() : null;
+                    if (user && typeof window.FirebaseSync.saveToCloud === 'function') {
+                        window.FirebaseSync.saveToCloud(extState).then(res => {
+                            if (res && res.success) {
+                                window.game.showToast('🎉 已成功將擴充功能完整魚缸與自訂小魚同步至雲端！', 'success', 6000);
+                                window.game._pendingExtensionSync = null;
+                            }
+                        });
+                    }
+                } else {
+                    if (restored.mergedCount > 0) {
+                        await Storage.saveLocalOnly(window.game.state);
+                        if (typeof window.game.applyState === 'function') {
+                            window.game.applyState(window.game.state);
                         }
-                    });
+                        const user = window.FirebaseSync ? window.FirebaseSync.getCurrentUser() : null;
+                        if (user && typeof window.FirebaseSync.saveToCloud === 'function') {
+                            window.FirebaseSync.saveToCloud(window.game.state);
+                        }
+                    }
                 }
+            } else {
+                window._pendingFullExtensionState = extState;
+                await Storage.saveLocalOnly(extState);
             }
         } catch (err) {
             console.error('[Storage Bridge] Error handling AF_FULL_EXTENSION_STATE:', err);
