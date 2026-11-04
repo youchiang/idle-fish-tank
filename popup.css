@@ -1433,3 +1433,370 @@ body.web-mode.tank-size-3 .aquarium-container {
     color: #a4b0be;
     text-align: center;
 }
+
+/* ========================================================
+   8. Tank ID, Visiting Mode Banner & Lobby Modal Styles
+   ======================================================== */
+.lobby-btn {
+    font-size: 11px;
+    padding: 3px 7px;
+    border-radius: 8px;
+    background: rgba(155, 89, 182, 0.25);
+    border: 1px solid rgba(155, 89, 182, 0.45);
+    color: #d6a2e8;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    transition: all 0.2s ease;
+}
+
+.lobby-btn:hover {
+    background: rgba(155, 89, 182, 0.45);
+    border-color: #9b59b6;
+    box-shadow: 0 0 10px rgba(155, 89, 182, 0.4);
+}
+
+.tank-id-bar {
+    height: 22px;
+    background: rgba(4, 18, 38, 0.88);
+    backdrop-filter: blur(4px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 0 10px;
+    font-size: 10px;
+    color: #a4b0be;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    z-index: 9;
+}
+
+.tank-id-label {
+    color: #74b9ff;
+    font-weight: 600;
+}
+
+.tank-id-val {
+    font-family: monospace;
+    color: #ffd700;
+    background: rgba(0, 0, 0, 0.35);
+    padding: 1px 6px;
+    border-radius: 4px;
+    max-width: 140px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    cursor: pointer;
+    transition: color 0.2s;
+}
+
+.tank-id-val:hover {
+    color: #fff;
+    text-decoration: underline;
+}
+
+.copy-id-btn {
+    background: rgba(255, 255, 255, 0.1);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: 4px;
+    padding: 0 6px;
+    color: #dcdde1;
+    font-size: 10px;
+    cursor: pointer;
+    line-height: 16px;
+    transition: all 0.2s;
+}
+
+.copy-id-btn:hover {
+    background: rgba(0, 206, 201, 0.25);
+    border-color: #00cec9;
+    color: #00cec9;
+}
+
+.visiting-banner {
+    height: 38px;
+    background: linear-gradient(90deg, rgba(230, 126, 34, 0.95), rgba(243, 156, 18, 0.95));
+    backdrop-filter: blur(8px);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 10px;
+    color: #fff;
+    font-size: 12px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.3);
+    z-index: 15;
+    animation: bannerSlideDown 0.3s ease;
+}
+
+@keyframes bannerSlideDown {
+    from { transform: translateY(-100%); }
+    to { transform: translateY(0); }
+}
+
+.visiting-info {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+}
+
+.visiting-badge {
+    background: rgba(0, 0, 0, 0.35);
+    padding: 2px 6px;
+    border-radius: 6px;
+    font-size: 10px;
+    font-weight: 700;
+    white-space: nowrap;
+}
+
+.visiting-title {
+    font-weight: 700;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 120px;
+}
+
+.visiting-actions {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    flex-shrink: 0;
+}
+
+.visiting-btn {
+    padding: 4px 8px;
+    border-radius: 6px;
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+    border: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    transition: all 0.2s;
+}
+
+.like-btn {
+    background: rgba(255, 255, 255, 0.95);
+    color: #e74c3c;
+}
+
+.like-btn:hover {
+    background: #fff;
+    transform: scale(1.05);
+}
+
+.feed-friend-btn {
+    background: rgba(0, 0, 0, 0.35);
+    color: #fff;
+}
+
+.feed-friend-btn:hover {
+    background: rgba(0, 0, 0, 0.55);
+}
+
+.exit-btn {
+    background: #2c3e50;
+    color: #ecf0f1;
+}
+
+.exit-btn:hover {
+    background: #1a252f;
+}
+
+.lobby-card {
+    max-width: 410px;
+    width: 92%;
+}
+
+.lobby-section {
+    margin-bottom: 12px;
+}
+
+.lobby-label {
+    font-size: 12px;
+    font-weight: 600;
+    color: #a4b0be;
+    display: block;
+    margin-bottom: 6px;
+}
+
+.lobby-search-row {
+    display: flex;
+    gap: 8px;
+}
+
+.lobby-input {
+    flex: 1;
+    background: rgba(0, 0, 0, 0.35);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 8px;
+    padding: 8px 12px;
+    color: #fff;
+    font-size: 12px;
+}
+
+.lobby-input:focus {
+    outline: none;
+    border-color: #00cec9;
+}
+
+.visit-go-btn {
+    padding: 8px 14px;
+    font-size: 12px;
+    white-space: nowrap;
+    border-radius: 8px;
+}
+
+.lobby-public-card {
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 10px;
+    padding: 10px 12px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.public-card-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.public-card-title {
+    font-size: 12px;
+    font-weight: 700;
+    color: #81ecec;
+}
+
+.public-card-desc {
+    font-size: 10px;
+    color: #a4b0be;
+    line-height: 1.3;
+}
+
+.lobby-header-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 8px;
+}
+
+.refresh-pill-btn {
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 6px;
+    color: #81ecec;
+    font-size: 11px;
+    padding: 2px 8px;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.refresh-pill-btn:hover {
+    background: rgba(255, 255, 255, 0.18);
+}
+
+.lobby-tank-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-height: 240px;
+    overflow-y: auto;
+    padding-right: 2px;
+}
+
+.lobby-tank-card {
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 10px;
+    padding: 10px 12px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    transition: all 0.2s;
+}
+
+.lobby-tank-card:hover {
+    background: rgba(255, 255, 255, 0.1);
+    border-color: rgba(0, 206, 201, 0.5);
+    transform: translateY(-1px);
+}
+
+.tank-card-left {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+}
+
+.tank-avatar {
+    width: 38px;
+    height: 38px;
+    border-radius: 50%;
+    border: 2px solid #81ecec;
+    object-fit: cover;
+    flex-shrink: 0;
+}
+
+.tank-card-meta {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.tank-card-title {
+    font-size: 13px;
+    font-weight: 700;
+    color: #fff;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.tank-card-sub {
+    font-size: 11px;
+    color: #a4b0be;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.tank-card-pills {
+    display: flex;
+    gap: 4px;
+    margin-top: 2px;
+}
+
+.tank-pill {
+    font-size: 9px;
+    padding: 1px 5px;
+    border-radius: 4px;
+    background: rgba(0, 0, 0, 0.3);
+    color: #ffd700;
+}
+
+.visit-action-btn {
+    padding: 6px 12px;
+    border-radius: 8px;
+    font-size: 11px;
+    font-weight: 700;
+    background: linear-gradient(135deg, #0984e3, #00cec9);
+    color: #fff;
+    border: none;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: all 0.2s;
+    flex-shrink: 0;
+}
+
+.visit-action-btn:hover {
+    filter: brightness(1.15);
+    transform: scale(1.04);
+}

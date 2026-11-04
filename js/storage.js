@@ -14,6 +14,10 @@ const Storage = {
             waterCleanliness: 100, // 0 - 100
             lastSavedTime: Date.now(),
             soundEnabled: true,
+            tankId: 'tank_' + Math.random().toString(36).substring(2, 10),
+            tankName: '我的療癒水族箱',
+            isPublic: true,
+            likes: 0,
             upgrades: {
                 foodTier: 1,         // 1: 基礎碎屑, 2: 凍乾豐年蝦, 3: 螺旋藻大餐, 4: 皇家金饌
                 autoFeederTier: 0,   // 0: 無, 1: 慢速, 2: 中速, 3: 智慧高頻
@@ -257,6 +261,19 @@ const Storage = {
 
         if (!Array.isArray(merged.fishList) || merged.fishList.length === 0) {
             merged.fishList = def.fishList;
+        }
+
+        if (!merged.tankId) {
+            merged.tankId = 'tank_' + Math.random().toString(36).substring(2, 10);
+        }
+        if (typeof merged.isPublic !== 'boolean') {
+            merged.isPublic = true;
+        }
+        if (typeof merged.likes !== 'number') {
+            merged.likes = 0;
+        }
+        if (!merged.tankName) {
+            merged.tankName = '我的療癒水族箱';
         }
 
         return merged;

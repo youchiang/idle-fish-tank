@@ -29,11 +29,31 @@
             </div>
 
             <div class="top-action-group">
+                <button id="lobbyBtn" class="icon-btn lobby-btn" title="水族館探訪大廳">🧭 探訪</button>
                 <button id="cloudAuthBtn" class="icon-btn cloud-auth-btn" title="雲端帳號與存檔同步">👤 登入</button>
                 <button id="triggerEventBtn" class="icon-btn event-trigger-btn" title="測試突發事件：召喚捕魚手！">🐾 抓魚手</button>
                 <button id="soundToggleBtn" class="icon-btn" title="切換音效">🔊</button>
             </div>
         </header>
+
+        <!-- Tank ID Bar & Visiting Banner -->
+        <div class="tank-id-bar">
+            <span class="tank-id-label">魚缸 ID:</span>
+            <span id="tankIdDisplay" class="tank-id-val" title="點擊一鍵複製魚缸 ID">載入中...</span>
+            <button id="copyTankIdBtn" class="copy-id-btn" title="複製魚缸 ID">📋 複製</button>
+        </div>
+
+        <div id="visitingBanner" class="visiting-banner hidden">
+            <div class="visiting-info">
+                <span class="visiting-badge">👀 參觀中</span>
+                <span id="visitingTitle" class="visiting-title">好友的水族箱</span>
+            </div>
+            <div class="visiting-actions">
+                <button id="likeTankBtn" class="visiting-btn like-btn" title="給這座水族館點個讚！">❤️ 點讚 (<span id="visitingLikesCount">0</span>)</button>
+                <button id="feedFriendBtn" class="visiting-btn feed-friend-btn" title="幫好友投餵一次飼料！">🥫 幫餵食</button>
+                <button id="exitVisitingBtn" class="visiting-btn exit-btn" title="返回自己的水族箱">🏠 返回</button>
+            </div>
+        </div>
 
         <!-- Main Aquarium Canvas Viewport -->
         <div class="canvas-wrapper">
@@ -551,6 +571,51 @@
                             </div>
                         </button>
                         <input type="file" id="importSaveFileInput" accept=".json,application/json" style="display: none;">
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 8. Tank Lobby & Visiting Modal -->
+    <div id="lobbyModal" class="modal-overlay hidden">
+        <div class="modal-card lobby-card">
+            <div class="modal-header">
+                <h3>🧭 水族館探訪大廳</h3>
+                <button class="close-modal-btn" data-close="lobbyModal">&times;</button>
+            </div>
+            <div class="modal-body scrollable">
+                <!-- Search / Visit by ID -->
+                <div class="lobby-section">
+                    <label for="visitTankIdInput" class="lobby-label">🔍 輸入好友魚缸 ID：</label>
+                    <div class="lobby-search-row">
+                        <input type="text" id="visitTankIdInput" class="lobby-input" placeholder="請貼上好友魚缸 ID 或 UID...">
+                        <button id="visitTargetBtn" class="confirm-btn visit-go-btn">前往參觀 🚀</button>
+                    </div>
+                </div>
+
+                <!-- Public Tank Toggle -->
+                <div class="lobby-public-card">
+                    <div class="public-card-text">
+                        <span class="public-card-title">🌐 公開我的魚缸供大家參觀</span>
+                        <span class="public-card-desc">開啟後，其他玩家能在大廳看到你的魚缸並前來互動與點讚！</span>
+                    </div>
+                    <label class="switch-label">
+                        <input type="checkbox" id="publicTankToggle" checked>
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+
+                <hr class="cloud-divider">
+
+                <!-- Public Tanks Lobby Grid -->
+                <div class="lobby-section">
+                    <div class="lobby-header-row">
+                        <span class="section-title">🌟 公開水族館大廳</span>
+                        <button id="refreshLobbyBtn" class="refresh-pill-btn" title="重新整理大廳名單">🔄 重新整理</button>
+                    </div>
+                    <div id="lobbyTankList" class="lobby-tank-list">
+                        <!-- Dynamically rendered -->
                     </div>
                 </div>
             </div>

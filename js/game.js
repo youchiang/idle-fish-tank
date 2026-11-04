@@ -43,6 +43,11 @@ class Game {
         this.editUploadImage = null;
         this.selectedDecorImage = null;
 
+        // 探訪他人水族箱狀態 (Visiting Mode)
+        this.isVisiting = false;
+        this.myState = null;
+        this.visitingTargetId = null;
+
         this.init();
     }
 
@@ -72,10 +77,20 @@ class Game {
             // 7. Bind UI Events & Mouse Tracker
             this.bindEvents();
 
-            // 8. Update HUD
+            // 8. Update HUD & Tank ID Display
             this.updateHUD();
+            this.updateTankIdUI();
 
-            // 9. Start main render & simulation loop
+            // 9. Check URL parameter ?tank=TARGET_ID for instant visiting
+            const urlParams = new URLSearchParams(window.location.search);
+            const targetTankParam = urlParams.get('tank');
+            if (targetTankParam) {
+                setTimeout(() => {
+                    this.visitTank(targetTankParam);
+                }, 400);
+            }
+
+            // 10. Start main render & simulation loop
             requestAnimationFrame((t) => this.loop(t));
         } catch (err) {
             console.error('Aquarium initialization error, launching fallback render loop:', err);
@@ -285,6 +300,10 @@ class Game {
         const decorBtn = document.getElementById('decorBtn');
         if (decorBtn) {
             decorBtn.addEventListener('click', () => {
+                if (this.isVisiting) {
+                    this.particles.addFloatingText(this.width / 2, 70, '👀 參觀模式中無法修改好友的水族箱造景喔！', '#ff7675', 14);
+                    return;
+                }
                 this.syncDecorModalUI();
                 const dModal = document.getElementById('decorModal');
                 if (dModal) dModal.classList.remove('hidden');
@@ -295,6 +314,10 @@ class Game {
         const rosterBtn = document.getElementById('rosterBtn');
         if (rosterBtn) {
             rosterBtn.addEventListener('click', () => {
+                if (this.isVisiting) {
+                    this.particles.addFloatingText(this.width / 2, 70, '👀 參觀模式中無法管理或放生好友的小魚喔！', '#ff7675', 14);
+                    return;
+                }
                 this.renderRoster();
                 const rModal = document.getElementById('rosterModal');
                 if (rModal) rModal.classList.remove('hidden');
@@ -305,6 +328,7 @@ class Game {
         const rosterAddBtn = document.getElementById('rosterAddFishBtn');
         if (rosterAddBtn) {
             rosterAddBtn.addEventListener('click', () => {
+                if (this.isVisiting) return;
                 const rModal = document.getElementById('rosterModal');
                 const cModal = document.getElementById('customFishModal');
                 if (rModal) rModal.classList.add('hidden');
@@ -316,6 +340,10 @@ class Game {
         const shopBtn = document.getElementById('shopBtn');
         if (shopBtn) {
             shopBtn.addEventListener('click', () => {
+                if (this.isVisiting) {
+                    this.particles.addFloatingText(this.width / 2, 70, '👀 參觀模式中無法購買好友水族箱的設施喔！', '#ff7675', 14);
+                    return;
+                }
                 this.renderShop();
                 const sModal = document.getElementById('shopModal');
                 if (sModal) sModal.classList.remove('hidden');
@@ -379,6 +407,10 @@ class Game {
         const customFishBtn = document.getElementById('customFishBtn');
         if (customFishBtn) {
             customFishBtn.addEventListener('click', () => {
+                if (this.isVisiting) {
+                    this.particles.addFloatingText(this.width / 2, 70, '👀 參觀模式中無法添加自訂小魚至好友的魚缸喔！', '#ff7675', 14);
+                    return;
+                }
                 this.selectedUploadImage = null;
                 if (urlInput) urlInput.value = '';
                 if (fileInput) fileInput.value = '';
@@ -521,10 +553,11 @@ class Game {
             });
         });
 
-        // 綁定編輯小魚、造景工坊與雲端存檔專屬事件
+        // 綁定編輯小魚、造景工坊、雲端存檔與探訪大廳專屬事件
         this.initEditFishEvents();
         this.initDecorWorkshopEvents();
         this.initCloudSyncEvents();
+        this.initLobbyEvents();
     }
 
     applyState(newState) {
@@ -596,6 +629,7 @@ class Game {
                 if (googleLogoutBtn) googleLogoutBtn.classList.add('hidden');
                 if (syncNowBtn) syncNowBtn.disabled = true;
             }
+            this.updateTankIdUI();
         };
 
         // Open Cloud Modal
@@ -720,6 +754,276 @@ class Game {
                 updateAuthUI(user);
             });
         }
+    }
+
+    updateTankIdUI() {
+        const idDisplay = document.getElementById('tankIdDisplay');
+        const copyBtn = document.getElementById('copyTankIdBtn');
+        if (!idDisplay) return;
+
+        let currentId = 'guest';
+        if (window.FirebaseSync && window.FirebaseSync.getCurrentUser()) {
+            currentId = window.FirebaseSync.getCurrentUser().uid;
+        } else if (this.state && this.state.tankId) {
+            currentId = this.state.tankId;
+        }
+
+        idDisplay.textContent = currentId;
+        idDisplay.title = `魚缸 ID: ${currentId}（點擊一鍵複製）`;
+
+        const doCopy = () => {
+            const shareUrl = `${window.location.origin}${window.location.pathname}?tank=${currentId}`;
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(currentId).then(() => {
+                    this.particles.addFloatingText(this.width / 2, 70, '📋 魚缸 ID 已複製至剪貼簿！', '#ffd700', 15);
+                    if (copyBtn) {
+                        const orig = copyBtn.textContent;
+                        copyBtn.textContent = '✅ 已複製';
+                        setTimeout(() => copyBtn.textContent = orig, 1800);
+                    }
+                }).catch(() => {
+                    prompt('請複製你的魚缸 ID：', currentId);
+                });
+            } else {
+                prompt('請複製你的魚缸 ID：', currentId);
+            }
+        };
+
+        if (copyBtn && !copyBtn._bound) {
+            copyBtn._bound = true;
+            copyBtn.addEventListener('click', doCopy);
+        }
+        if (!idDisplay._bound) {
+            idDisplay._bound = true;
+            idDisplay.addEventListener('click', doCopy);
+        }
+    }
+
+    async visitTank(tankId) {
+        if (!tankId) return;
+
+        // Backup my original state if not visiting yet
+        if (!this.isVisiting) {
+            this.myState = JSON.parse(JSON.stringify(this.state));
+        }
+
+        this.particles.addFloatingText(this.width / 2, 70, `⏳ 正在連接並載入【${tankId}】的水族箱...`, '#81ecec', 14);
+
+        const res = await window.FirebaseSync.loadTankById(tankId);
+        if (!res.success || !res.gameState) {
+            this.particles.addFloatingText(this.width / 2, 70, `❌ 參觀失敗：${res.error || '找不到此魚缸'}`, '#ff7675', 15);
+            return;
+        }
+
+        this.isVisiting = true;
+        this.visitingTargetId = tankId;
+
+        // Close lobby modal if open
+        const lModal = document.getElementById('lobbyModal');
+        if (lModal) lModal.classList.add('hidden');
+
+        // Update visiting banner
+        const banner = document.getElementById('visitingBanner');
+        const titleEl = document.getElementById('visitingTitle');
+        const likesEl = document.getElementById('visitingLikesCount');
+        if (banner) banner.classList.remove('hidden');
+        if (titleEl) titleEl.textContent = `${res.displayName} 的水族箱`;
+        if (likesEl) likesEl.textContent = res.likes || 0;
+
+        // Apply visiting state
+        this.state = res.gameState;
+        this.fish = (this.state.fishList || []).map(fData => new Fish(fData, { width: this.width, height: this.height }));
+        this.applyTankSize((this.state.upgrades && this.state.upgrades.tankSizeTier) || 1);
+        this.updateHUD();
+
+        // Update URL param
+        if (window.history && window.history.pushState) {
+            window.history.pushState(null, '', `?tank=${tankId}`);
+        }
+
+        if (window.soundCtrl) window.soundCtrl.playFanfare();
+        this.particles.addFloatingText(this.width / 2, 70, `👀 歡迎參觀【${res.displayName}】的水族箱！`, '#00cec9', 16);
+    }
+
+    exitVisitingMode() {
+        if (!this.isVisiting || !this.myState) return;
+
+        this.isVisiting = false;
+        this.visitingTargetId = null;
+
+        // Hide banner
+        const banner = document.getElementById('visitingBanner');
+        if (banner) banner.classList.add('hidden');
+
+        // Restore my state
+        this.state = this.myState;
+        this.myState = null;
+        this.fish = (this.state.fishList || []).map(fData => new Fish(fData, { width: this.width, height: this.height }));
+        this.applyTankSize((this.state.upgrades && this.state.upgrades.tankSizeTier) || 1);
+        this.updateHUD();
+        this.updateTankIdUI();
+
+        // Remove URL param
+        if (window.history && window.history.pushState) {
+            window.history.pushState(null, '', window.location.pathname);
+        }
+
+        this.particles.addFloatingText(this.width / 2, 70, '🏠 已返回你專屬的水族箱！', '#ffd700', 16);
+    }
+
+    initLobbyEvents() {
+        const lobbyBtn = document.getElementById('lobbyBtn');
+        const lobbyModal = document.getElementById('lobbyModal');
+        const visitTargetBtn = document.getElementById('visitTargetBtn');
+        const visitTankIdInput = document.getElementById('visitTankIdInput');
+        const publicTankToggle = document.getElementById('publicTankToggle');
+        const refreshLobbyBtn = document.getElementById('refreshLobbyBtn');
+
+        const likeTankBtn = document.getElementById('likeTankBtn');
+        const feedFriendBtn = document.getElementById('feedFriendBtn');
+        const exitVisitingBtn = document.getElementById('exitVisitingBtn');
+
+        // Open lobby modal
+        if (lobbyBtn) {
+            lobbyBtn.addEventListener('click', () => {
+                if (lobbyModal) lobbyModal.classList.remove('hidden');
+                if (publicTankToggle && this.state) {
+                    publicTankToggle.checked = this.state.isPublic !== false;
+                }
+                this.renderLobby();
+            });
+        }
+
+        // Toggle public status
+        if (publicTankToggle) {
+            publicTankToggle.addEventListener('change', () => {
+                if (this.isVisiting) return;
+                this.state.isPublic = publicTankToggle.checked;
+                this.saveState();
+                const statusMsg = this.state.isPublic ? '🌐 已公開你的水族箱！其他玩家可在大廳前來參觀！' : '🔒 已設為私人魚缸，大廳將不再顯示。';
+                this.particles.addFloatingText(this.width / 2, 70, statusMsg, '#81ecec', 14);
+            });
+        }
+
+        // Visit target ID button
+        if (visitTargetBtn && visitTankIdInput) {
+            visitTargetBtn.addEventListener('click', () => {
+                const targetId = visitTankIdInput.value.trim();
+                if (!targetId) {
+                    alert('請輸入要參觀的好友魚缸 ID！');
+                    return;
+                }
+                this.visitTank(targetId);
+            });
+
+            visitTankIdInput.addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') {
+                    const targetId = visitTankIdInput.value.trim();
+                    if (targetId) this.visitTank(targetId);
+                }
+            });
+        }
+
+        // Refresh lobby button
+        if (refreshLobbyBtn) {
+            refreshLobbyBtn.addEventListener('click', () => {
+                this.renderLobby();
+            });
+        }
+
+        // Visiting Banner Buttons
+        if (likeTankBtn) {
+            likeTankBtn.addEventListener('click', async () => {
+                if (!this.isVisiting || !this.visitingTargetId) return;
+                if (likeTankBtn._liked) {
+                    this.particles.addFloatingText(this.width / 2, 70, '❤️ 你已經為這座水族館點過讚囉！', '#ffd700', 14);
+                    return;
+                }
+                likeTankBtn._liked = true;
+                const likesEl = document.getElementById('visitingLikesCount');
+                if (likesEl) {
+                    likesEl.textContent = parseInt(likesEl.textContent || '0', 10) + 1;
+                }
+                if (window.soundCtrl) window.soundCtrl.playCoinSound();
+                this.particles.addFloatingText(this.width / 2, 70, '❤️ 點讚成功！給好友滿滿鼓勵！', '#ff7675', 16);
+                await window.FirebaseSync.likeTank(this.visitingTargetId);
+            });
+        }
+
+        if (feedFriendBtn) {
+            feedFriendBtn.addEventListener('click', () => {
+                if (!this.isVisiting) return;
+                this.dropFood(this.width / 2 + (Math.random() - 0.5) * 80, 25);
+                this.particles.addFloatingText(this.width / 2, 70, '🥫 幫忙投餵飼料！好友的小魚吃得很開心！', '#ffd700', 14);
+                if (window.soundCtrl) window.soundCtrl.playCleanSound();
+            });
+        }
+
+        if (exitVisitingBtn) {
+            exitVisitingBtn.addEventListener('click', () => {
+                this.exitVisitingMode();
+            });
+        }
+    }
+
+    async renderLobby() {
+        const container = document.getElementById('lobbyTankList');
+        if (!container) return;
+
+        container.innerHTML = '<div style="text-align:center;padding:20px;color:#81ecec;font-size:12px;">⏳ 正在探索公開水族館大廳...</div>';
+
+        const res = await window.FirebaseSync.getPublicTanks();
+        container.innerHTML = '';
+
+        if (!res.success || !res.tanks || res.tanks.length === 0) {
+            container.innerHTML = '<div style="text-align:center;padding:20px;color:#a4b0be;font-size:12px;">目前大廳尚無其他公開魚缸，點擊上方開啟公開成為第一位大廳之星！</div>';
+            return;
+        }
+
+        const THEME_NAMES = {
+            ocean: '經典蔚藍',
+            emerald: '熱帶翡翠',
+            abyss: '午夜幽深',
+            sunset: '夕陽珊瑚',
+            cyber: '賽博霓虹'
+        };
+
+        res.tanks.forEach(tank => {
+            const card = document.createElement('div');
+            card.className = 'lobby-tank-card';
+
+            const photo = tank.photoURL || 'icons/icon48.png';
+            const themeLabel = THEME_NAMES[tank.theme] || '蔚藍海洋';
+            const fishCount = tank.fishCount || 1;
+            const likes = tank.likes || 0;
+            const title = tank.tankName || `${tank.displayName || '島主'} 的水族館`;
+
+            card.innerHTML = `
+                <div class="tank-card-left">
+                    <img src="${photo}" class="tank-avatar" alt="頭像">
+                    <div class="tank-card-meta">
+                        <div class="tank-card-title">${title}</div>
+                        <div class="tank-card-sub">
+                            <span>👤 ${tank.displayName || '魚友'}</span>
+                            <span>·</span>
+                            <span>❤️ ${likes} 讚</span>
+                        </div>
+                        <div class="tank-card-pills">
+                            <span class="tank-pill">🐟 ${fishCount} 隻魚</span>
+                            <span class="tank-pill">🎨 ${themeLabel}</span>
+                        </div>
+                    </div>
+                </div>
+                <button class="visit-action-btn" data-tank-id="${tank.uid}">參觀 🚀</button>
+            `;
+
+            const visitBtn = card.querySelector('.visit-action-btn');
+            visitBtn.addEventListener('click', () => {
+                this.visitTank(tank.uid);
+            });
+
+            container.appendChild(card);
+        });
     }
 
     // 觸發捕魚手突發事件 (10秒)
@@ -1524,7 +1828,7 @@ class Game {
     }
 
     saveState() {
-        if (!this.state) return;
+        if (!this.state || this.isVisiting) return;
         this.state.fishList = this.fish.map(f => ({
             id: f.id,
             speciesId: f.speciesId,
