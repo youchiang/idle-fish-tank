@@ -2,6 +2,7 @@
  * Firebase Cloud Sync Module for Idle Fish Tank (摸魚水族館)
  * Supports Google Authentication, Firestore Cloud Save/Load,
  * Public Tank Lobby & Cross-User Visiting.
+ * Features native Firestore REST API direct channel for Chrome Extension environment.
  */
 
 const firebaseConfig = {
@@ -25,6 +26,345 @@ const FirebaseSync = {
     db: null,
     _authMod: null,
     _firestoreMod: null,
+    _hasStorageListener: false,
+
+    // ==========================================
+    // 1. Firestore REST API Value Converters
+    // ==========================================
+
+    /**
+     * Convert JavaScript value to Firestore REST Value format
+     * @param {*} val
+     * @returns {Object}
+     */
+    toFirestoreValue(val) {
+        if (val === null || val === undefined) {
+            return { nullValue: null };
+        }
+        if (typeof val === 'boolean') {
+            return { booleanValue: val };
+        }
+        if (typeof val === 'number') {
+            if (!Number.isFinite(val)) {
+                return { integerValue: '0' };
+            }
+            if (Number.isInteger(val)) {
+                return { integerValue: String(val) };
+            }
+            return { doubleValue: val };
+        }
+        if (typeof val === 'string') {
+            return { stringValue: val };
+        }
+        if (Array.isArray(val)) {
+            return {
+                arrayValue: {
+                    values: val.map(item => this.toFirestoreValue(item))
+                }
+            };
+        }
+        if (typeof val === 'object') {
+            const fields = {};
+            for (const [k, v] of Object.entries(val)) {
+                if (v !== undefined && typeof v !== 'function') {
+                    fields[k] = this.toFirestoreValue(v);
+                }
+            }
+            return {
+                mapValue: { fields }
+            };
+        }
+        return { stringValue: String(val) };
+    },
+
+    /**
+     * Convert Firestore REST Field value back to JavaScript value
+     * @param {Object} field
+     * @returns {*}
+     */
+    fromFirestoreValue(field) {
+        if (!field || typeof field !== 'object') {
+            return null;
+        }
+        if ('nullValue' in field) {
+            return null;
+        }
+        if ('booleanValue' in field) {
+            return Boolean(field.booleanValue);
+        }
+        if ('integerValue' in field) {
+            return Number(field.integerValue);
+        }
+        if ('doubleValue' in field) {
+            return Number(field.doubleValue);
+        }
+        if ('stringValue' in field) {
+            return String(field.stringValue);
+        }
+        if ('timestampValue' in field) {
+            return new Date(field.timestampValue).getTime();
+        }
+        if ('arrayValue' in field) {
+            const arr = field.arrayValue && Array.isArray(field.arrayValue.values)
+                ? field.arrayValue.values
+                : [];
+            return arr.map(v => this.fromFirestoreValue(v));
+        }
+        if ('mapValue' in field) {
+            return this.fromFirestoreFields(field.mapValue.fields || {});
+        }
+        return null;
+    },
+
+    /**
+     * Convert JavaScript object to Firestore fields dictionary
+     * @param {Object} obj
+     * @returns {Object}
+     */
+    toFirestoreFields(obj) {
+        if (!obj || typeof obj !== 'object') return {};
+        const fields = {};
+        for (const [k, v] of Object.entries(obj)) {
+            if (v !== undefined && typeof v !== 'function') {
+                fields[k] = this.toFirestoreValue(v);
+            }
+        }
+        return fields;
+    },
+
+    /**
+     * Convert Firestore fields dictionary to JavaScript object
+     * @param {Object} fields
+     * @returns {Object}
+     */
+    fromFirestoreFields(fields) {
+        if (!fields || typeof fields !== 'object') return {};
+        const result = {};
+        for (const [k, v] of Object.entries(fields)) {
+            result[k] = this.fromFirestoreValue(v);
+        }
+        return result;
+    },
+
+    // ==========================================
+    // 2. REST API Helpers & Token Management
+    // ==========================================
+
+    _getRestBaseUrl() {
+        return `https://firestore.googleapis.com/v1/projects/${this.config.projectId}/databases/(default)/documents`;
+    },
+
+    /**
+     * Retrieve valid ID Token for REST API, refreshing if expired or forced
+     * @param {boolean} [forceRefresh=false]
+     * @returns {Promise<string|null>}
+     */
+    async _getValidRestToken(forceRefresh = false) {
+        if (!this.currentUser) return null;
+
+        const refreshToken = this.currentUser.refreshToken ||
+            (this.currentUser.stsTokenManager && this.currentUser.stsTokenManager.refreshToken);
+        const now = Date.now();
+
+        // 1. If not forcing refresh and current idToken is present and not expired
+        if (!forceRefresh && this.currentUser.idToken && this.currentUser._tokenExpiry && now < this.currentUser._tokenExpiry) {
+            return this.currentUser.idToken;
+        }
+
+        // 2. If no refreshToken available, fallback to existing idToken
+        if (!refreshToken) {
+            return this.currentUser.idToken || null;
+        }
+
+        // 3. Request fresh token from Google SecureToken API
+        try {
+            const url = `https://securetoken.googleapis.com/v1/token?key=${this.config.apiKey}`;
+            const resp = await fetch(url, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded'
+                },
+                body: `grant_type=refresh_token&refresh_token=${encodeURIComponent(refreshToken)}`
+            });
+
+            if (resp.ok) {
+                const data = await resp.json();
+                if (data && data.id_token) {
+                    this.currentUser.idToken = data.id_token;
+                    if (data.refresh_token) {
+                        this.currentUser.refreshToken = data.refresh_token;
+                    }
+                    const expiresInSec = parseInt(data.expires_in, 10) || 3600;
+                    this.currentUser._tokenExpiry = Date.now() + Math.max(60, expiresInSec - 120) * 1000;
+
+                    // Sync updated token back to chrome.storage.local
+                    if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+                        chrome.storage.local.set({ cloudUser: this.currentUser });
+                    }
+
+                    return data.id_token;
+                }
+            } else {
+                console.warn('[FirebaseSync] Refresh token endpoint returned status:', resp.status);
+            }
+        } catch (e) {
+            console.warn('[FirebaseSync] Refresh token network error:', e);
+        }
+
+        return this.currentUser.idToken || null;
+    },
+
+    /**
+     * Dispatch REST request with auto-retry on 401/403 token expiration
+     * @param {string} url
+     * @param {Object} options
+     * @returns {Promise<Response>}
+     */
+    async _restFetch(url, options = {}) {
+        let token = await this._getValidRestToken(false);
+        const headers = {
+            'Content-Type': 'application/json',
+            ...(options.headers || {})
+        };
+        if (token) {
+            headers['Authorization'] = `Bearer ${token}`;
+        }
+
+        let resp = await fetch(url, { ...options, headers });
+
+        // If unauthorized/forbidden and refresh token exists, force refresh and retry once
+        const hasRefreshToken = this.currentUser && (
+            this.currentUser.refreshToken ||
+            (this.currentUser.stsTokenManager && this.currentUser.stsTokenManager.refreshToken)
+        );
+
+        if ((resp.status === 401 || resp.status === 403) && hasRefreshToken) {
+            console.warn(`[FirebaseSync] REST API returned ${resp.status}, attempting token refresh...`);
+            token = await this._getValidRestToken(true);
+            if (token) {
+                headers['Authorization'] = `Bearer ${token}`;
+                resp = await fetch(url, { ...options, headers });
+            }
+        }
+
+        return resp;
+    },
+
+    /**
+     * REST setDoc (PATCH to Firestore document)
+     * @param {string} collection
+     * @param {string} docId
+     * @param {Object} dataObj
+     * @returns {Promise<Object>}
+     */
+    async _restSetDoc(collection, docId, dataObj) {
+        const baseUrl = this._getRestBaseUrl();
+        const url = `${baseUrl}/${collection}/${encodeURIComponent(docId)}`;
+        const body = JSON.stringify({
+            fields: this.toFirestoreFields(dataObj)
+        });
+
+        const resp = await this._restFetch(url, {
+            method: 'PATCH',
+            body: body
+        });
+
+        if (!resp.ok) {
+            let errText = '';
+            try {
+                const errJson = await resp.json();
+                errText = (errJson.error && errJson.error.message) || JSON.stringify(errJson);
+            } catch (_) {
+                errText = `HTTP ${resp.status}`;
+            }
+            throw new Error(`Firestore REST setDoc error (${resp.status}): ${errText}`);
+        }
+
+        return await resp.json();
+    },
+
+    /**
+     * REST getDoc (GET Firestore document)
+     * @param {string} collection
+     * @param {string} docId
+     * @returns {Promise<{exists: boolean, data: Object|null}>}
+     */
+    async _restGetDoc(collection, docId) {
+        const baseUrl = this._getRestBaseUrl();
+        const url = `${baseUrl}/${collection}/${encodeURIComponent(docId)}`;
+
+        const resp = await this._restFetch(url, {
+            method: 'GET'
+        });
+
+        if (resp.status === 404) {
+            return { exists: false, data: null };
+        }
+
+        if (!resp.ok) {
+            let errText = '';
+            try {
+                const errJson = await resp.json();
+                errText = (errJson.error && errJson.error.message) || JSON.stringify(errJson);
+            } catch (_) {
+                errText = `HTTP ${resp.status}`;
+            }
+            throw new Error(`Firestore REST getDoc error (${resp.status}): ${errText}`);
+        }
+
+        const json = await resp.json();
+        if (json && json.fields) {
+            return {
+                exists: true,
+                data: this.fromFirestoreFields(json.fields),
+                createTime: json.createTime,
+                updateTime: json.updateTime
+            };
+        }
+        return { exists: false, data: null };
+    },
+
+    /**
+     * REST listDocs (GET collection documents)
+     * @param {string} collection
+     * @param {number} [pageSize=25]
+     * @returns {Promise<Array<Object>>}
+     */
+    async _restListDocs(collection, pageSize = 25) {
+        const baseUrl = this._getRestBaseUrl();
+        const url = `${baseUrl}/${collection}?pageSize=${pageSize}`;
+
+        const resp = await this._restFetch(url, {
+            method: 'GET'
+        });
+
+        if (!resp.ok) {
+            let errText = '';
+            try {
+                const errJson = await resp.json();
+                errText = (errJson.error && errJson.error.message) || JSON.stringify(errJson);
+            } catch (_) {
+                errText = `HTTP ${resp.status}`;
+            }
+            throw new Error(`Firestore REST listDocs error (${resp.status}): ${errText}`);
+        }
+
+        const json = await resp.json();
+        const docs = [];
+        if (json && Array.isArray(json.documents)) {
+            for (const doc of json.documents) {
+                const parts = (doc.name || '').split('/');
+                const docId = parts[parts.length - 1];
+                const data = this.fromFirestoreFields(doc.fields || {});
+                docs.push({ uid: docId, id: docId, ...data });
+            }
+        }
+        return docs;
+    },
+
+    // ==========================================
+    // 3. Lifecycle & Initialization
+    // ==========================================
 
     /**
      * Initialize Firebase App, Auth and Firestore
@@ -33,7 +373,7 @@ const FirebaseSync = {
     async init() {
         if (typeof window !== 'undefined' && window.location && window.location.protocol === 'chrome-extension:') {
             this.isInitialized = true;
-            this.isAvailable = false;
+            this.isAvailable = true; // REST API direct connection is ready
 
             // In Chrome Extension popup environment, read bridged cloudUser from chrome.storage.local
             if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
@@ -82,20 +422,30 @@ const FirebaseSync = {
             this.db = firestoreMod.getFirestore(app);
 
             // Listen to auth state changes
-            authMod.onAuthStateChanged(this.auth, (user) => {
+            authMod.onAuthStateChanged(this.auth, async (user) => {
                 this.currentUser = user;
                 this._notifyAuthListeners(user);
 
                 // Bridge to extension content script if running on web
                 if (typeof window !== 'undefined') {
                     if (user) {
+                        let idToken = '';
+                        let refreshToken = '';
+                        try {
+                            idToken = await user.getIdToken();
+                            refreshToken = user.refreshToken || (user.stsTokenManager && user.stsTokenManager.refreshToken) || '';
+                        } catch (tokErr) {
+                            console.warn('[FirebaseSync] Failed to retrieve tokens in onAuthStateChanged:', tokErr);
+                        }
                         window.postMessage({
                             type: 'AF_AUTH_SYNC_TO_EXT',
                             user: {
                                 uid: user.uid,
                                 displayName: user.displayName || '',
                                 email: user.email || '',
-                                photoURL: user.photoURL || ''
+                                photoURL: user.photoURL || '',
+                                idToken: idToken,
+                                refreshToken: refreshToken
                             }
                         }, '*');
                     } else {
@@ -111,16 +461,16 @@ const FirebaseSync = {
             this.initError = null;
             return { success: true };
         } catch (err) {
-            console.warn('[FirebaseSync] Firebase unavailable or restricted (offline / strict extension CSP). Using local mode.', err);
+            console.warn('[FirebaseSync] Firebase unavailable or restricted (offline / strict extension CSP). Falling back to REST mode.', err);
             this.isInitialized = true;
-            this.isAvailable = false;
+            this.isAvailable = true; // REST API direct connection remains available
             this.initError = err;
             return { success: false, error: err };
         }
     },
 
     /**
-     * Check if cloud service is ready
+     * Check if cloud service is ready via official JS SDK
      */
     isReady() {
         return this.isAvailable && !!this.auth && !!this.db;
@@ -148,13 +498,23 @@ const FirebaseSync = {
             this._notifyAuthListeners(this.currentUser);
 
             if (typeof window !== 'undefined' && result.user) {
+                let idToken = '';
+                let refreshToken = '';
+                try {
+                    idToken = await result.user.getIdToken();
+                    refreshToken = result.user.refreshToken || (result.user.stsTokenManager && result.user.stsTokenManager.refreshToken) || '';
+                } catch (tokErr) {
+                    console.warn('[FirebaseSync] Failed to retrieve tokens in loginWithGoogle:', tokErr);
+                }
                 window.postMessage({
                     type: 'AF_AUTH_SYNC_TO_EXT',
                     user: {
                         uid: result.user.uid,
                         displayName: result.user.displayName || '',
                         email: result.user.email || '',
-                        photoURL: result.user.photoURL || ''
+                        photoURL: result.user.photoURL || '',
+                        idToken: idToken,
+                        refreshToken: refreshToken
                     }
                 }, '*');
             }
@@ -211,21 +571,20 @@ const FirebaseSync = {
 
     /**
      * Save game state to Firestore at `users/{uid}` and update `publicTanks/{uid}`
+     * Supports both Firebase JS SDK and Native Firestore REST API direct fallback.
      * @param {Object} gameState
      */
     async saveToCloud(gameState) {
-        if (!this.isReady() || !this.currentUser) {
+        if (!this.currentUser) {
             return { success: false, reason: 'unauthenticated' };
         }
 
         try {
             const uid = this.currentUser.uid;
-            const docRef = this._firestoreMod.doc(this.db, 'users', uid);
-
-            // Deep clone to ensure strictly clean JSON data
             const cleanState = JSON.parse(JSON.stringify(gameState));
             const now = Date.now();
             cleanState.lastSavedTime = now;
+            cleanState.lastCloudSyncTime = now;
             cleanState.tankId = uid;
 
             const payload = {
@@ -236,27 +595,50 @@ const FirebaseSync = {
                 userPhotoURL: this.currentUser.photoURL || ''
             };
 
-            await this._firestoreMod.setDoc(docRef, payload, { merge: true });
+            const isPublic = cleanState.isPublic !== false;
+            const publicData = {
+                uid: uid,
+                displayName: this.currentUser.displayName || (this.currentUser.email ? this.currentUser.email.split('@')[0] : '神秘島主'),
+                photoURL: this.currentUser.photoURL || '',
+                fishCount: (cleanState.fishList || []).length,
+                theme: (cleanState.decorations && cleanState.decorations.theme) || 'ocean',
+                sandType: (cleanState.decorations && cleanState.decorations.sandType) || 'gold',
+                tankName: cleanState.tankName || ((this.currentUser.displayName || '島主') + ' 的水族箱'),
+                likes: cleanState.likes || 0,
+                updatedAt: now,
+                isPublic: isPublic
+            };
 
-            // Update public tank registry
-            try {
-                const publicRef = this._firestoreMod.doc(this.db, 'publicTanks', uid);
-                const isPublic = cleanState.isPublic !== false;
-                const publicData = {
-                    uid: uid,
-                    displayName: this.currentUser.displayName || (this.currentUser.email ? this.currentUser.email.split('@')[0] : '神秘島主'),
-                    photoURL: this.currentUser.photoURL || '',
-                    fishCount: (cleanState.fishList || []).length,
-                    theme: (cleanState.decorations && cleanState.decorations.theme) || 'ocean',
-                    sandType: (cleanState.decorations && cleanState.decorations.sandType) || 'gold',
-                    tankName: cleanState.tankName || ((this.currentUser.displayName || '島主') + ' 的水族箱'),
-                    likes: cleanState.likes || 0,
-                    updatedAt: now,
-                    isPublic: isPublic
-                };
-                await this._firestoreMod.setDoc(publicRef, publicData, { merge: true });
-            } catch (pubErr) {
-                console.warn('[FirebaseSync] publicTanks sync notice:', pubErr);
+            if (this.isReady()) {
+                try {
+                    const docRef = this._firestoreMod.doc(this.db, 'users', uid);
+                    await this._firestoreMod.setDoc(docRef, payload, { merge: true });
+
+                    try {
+                        const publicRef = this._firestoreMod.doc(this.db, 'publicTanks', uid);
+                        await this._firestoreMod.setDoc(publicRef, publicData, { merge: true });
+                    } catch (pubErr) {
+                        console.warn('[FirebaseSync] publicTanks sync notice:', pubErr);
+                    }
+                } catch (sdkErr) {
+                    console.warn('[FirebaseSync] SDK save failed, falling back to REST API:', sdkErr);
+                    await this._restSetDoc('users', uid, payload);
+                    await this._restSetDoc('publicTanks', uid, publicData).catch(() => {});
+                }
+            } else {
+                // Extension or SDK unavailable: directly use native REST API!
+                await this._restSetDoc('users', uid, payload);
+                await this._restSetDoc('publicTanks', uid, publicData).catch((pubErr) => {
+                    console.warn('[FirebaseSync] REST publicTanks notice:', pubErr);
+                });
+            }
+
+            // Update in-memory and local storage lastCloudSyncTime
+            if (gameState) {
+                gameState.lastCloudSyncTime = now;
+                if (typeof Storage !== 'undefined' && typeof Storage.saveLocalOnly === 'function') {
+                    Storage.saveLocalOnly(gameState).catch(() => {});
+                }
             }
 
             return { success: true, timestamp: now };
@@ -270,22 +652,46 @@ const FirebaseSync = {
      * Load game state from Firestore `users/{uid}`
      */
     async loadFromCloud() {
-        if (!this.isReady() || !this.currentUser) {
+        if (!this.currentUser) {
             return { success: false, reason: 'unauthenticated' };
         }
 
         try {
             const uid = this.currentUser.uid;
-            const docRef = this._firestoreMod.doc(this.db, 'users', uid);
-            const snap = await this._firestoreMod.getDoc(docRef);
+            let resultData = null;
+            let exists = false;
 
-            if (snap.exists()) {
-                const data = snap.data();
+            if (this.isReady()) {
+                try {
+                    const docRef = this._firestoreMod.doc(this.db, 'users', uid);
+                    const snap = await this._firestoreMod.getDoc(docRef);
+                    if (snap.exists()) {
+                        exists = true;
+                        resultData = snap.data();
+                    }
+                } catch (sdkErr) {
+                    console.warn('[FirebaseSync] SDK load failed, falling back to REST API:', sdkErr);
+                    const restRes = await this._restGetDoc('users', uid);
+                    if (restRes.exists) {
+                        exists = true;
+                        resultData = restRes.data;
+                    }
+                }
+            } else {
+                // Extension or SDK unavailable: directly use native REST API!
+                const restRes = await this._restGetDoc('users', uid);
+                if (restRes.exists) {
+                    exists = true;
+                    resultData = restRes.data;
+                }
+            }
+
+            if (exists && resultData) {
                 return {
                     success: true,
                     exists: true,
-                    data: data.gameState || data,
-                    updatedAt: data.updatedAt || 0
+                    data: resultData.gameState || resultData,
+                    updatedAt: resultData.updatedAt || 0
                 };
             } else {
                 return {
@@ -363,20 +769,35 @@ const FirebaseSync = {
             return { success: true, exists: true, ...DEMO_TANKS[trimmedId] };
         }
 
-        if (!this.isReady()) {
-            await this.init();
-        }
-
-        if (!this.isReady() || !this.db) {
-            return { success: false, error: '雲端服務未連線，無法查詢此 ID' };
-        }
-
         try {
-            const docRef = this._firestoreMod.doc(this.db, 'users', trimmedId);
-            const snap = await this._firestoreMod.getDoc(docRef);
+            let data = null;
+            let exists = false;
 
-            if (snap.exists()) {
-                const data = snap.data();
+            if (this.isReady()) {
+                try {
+                    const docRef = this._firestoreMod.doc(this.db, 'users', trimmedId);
+                    const snap = await this._firestoreMod.getDoc(docRef);
+                    if (snap.exists()) {
+                        exists = true;
+                        data = snap.data();
+                    }
+                } catch (sdkErr) {
+                    console.warn('[FirebaseSync] SDK loadTankById failed, falling back to REST:', sdkErr);
+                    const restRes = await this._restGetDoc('users', trimmedId);
+                    if (restRes.exists) {
+                        exists = true;
+                        data = restRes.data;
+                    }
+                }
+            } else {
+                const restRes = await this._restGetDoc('users', trimmedId);
+                if (restRes.exists) {
+                    exists = true;
+                    data = restRes.data;
+                }
+            }
+
+            if (exists && data) {
                 const gState = data.gameState || data;
                 const displayName = data.userDisplayName || (data.userEmail ? data.userEmail.split('@')[0] : '魚友玩家');
                 return {
@@ -427,26 +848,30 @@ const FirebaseSync = {
             }
         ];
 
-        if (!this.isReady()) {
-            await this.init();
-        }
-
-        if (!this.isReady() || !this.db) {
-            return { success: true, tanks: defaultDemos };
-        }
-
         try {
-            const colRef = this._firestoreMod.collection(this.db, 'publicTanks');
-            const snap = await this._firestoreMod.getDocs(colRef);
-            const list = [];
-            snap.forEach(docSnap => {
-                const item = docSnap.data();
-                if (item && item.isPublic !== false) {
-                    list.push({ uid: docSnap.id, ...item });
+            let list = [];
+            if (this.isReady()) {
+                try {
+                    const colRef = this._firestoreMod.collection(this.db, 'publicTanks');
+                    const snap = await this._firestoreMod.getDocs(colRef);
+                    snap.forEach(docSnap => {
+                        const item = docSnap.data();
+                        if (item && item.isPublic !== false) {
+                            list.push({ uid: docSnap.id, ...item });
+                        }
+                    });
+                } catch (sdkErr) {
+                    console.warn('[FirebaseSync] SDK getPublicTanks failed, falling back to REST:', sdkErr);
+                    list = await this._restListDocs('publicTanks');
                 }
-            });
+            } else {
+                list = await this._restListDocs('publicTanks');
+            }
 
-            // Sort by likes or updatedAt descending
+            // Filter out private tanks
+            list = list.filter(item => item && item.isPublic !== false);
+
+            // Sort by likes descending
             list.sort((a, b) => (b.likes || 0) - (a.likes || 0));
 
             // Merge demo tanks so the lobby always has curated community tanks
@@ -474,21 +899,31 @@ const FirebaseSync = {
             return { success: true, newLikes: 1 };
         }
 
-        if (!this.isReady() || !this.db) {
-            return { success: false, error: '雲端未連線' };
-        }
-
         try {
-            const publicRef = this._firestoreMod.doc(this.db, 'publicTanks', tankId);
-            const userRef = this._firestoreMod.doc(this.db, 'users', tankId);
-            const inc = this._firestoreMod.increment(1);
+            if (this.isReady()) {
+                try {
+                    const publicRef = this._firestoreMod.doc(this.db, 'publicTanks', tankId);
+                    const userRef = this._firestoreMod.doc(this.db, 'users', tankId);
+                    const inc = this._firestoreMod.increment(1);
 
-            await Promise.all([
-                this._firestoreMod.setDoc(publicRef, { likes: inc }, { merge: true }),
-                this._firestoreMod.setDoc(userRef, { 'gameState.likes': inc }, { merge: true }).catch(() => {})
-            ]);
+                    await Promise.all([
+                        this._firestoreMod.setDoc(publicRef, { likes: inc }, { merge: true }),
+                        this._firestoreMod.setDoc(userRef, { 'gameState.likes': inc }, { merge: true }).catch(() => {})
+                    ]);
 
-            return { success: true };
+                    return { success: true };
+                } catch (sdkErr) {
+                    console.warn('[FirebaseSync] SDK likeTank failed, falling back to REST:', sdkErr);
+                }
+            }
+
+            // REST fallback for likeTank:
+            // Fetch doc, increment likes, and patch
+            const pubDoc = await this._restGetDoc('publicTanks', tankId);
+            const currentData = (pubDoc.exists && pubDoc.data) ? pubDoc.data : {};
+            const newLikes = (currentData.likes || 0) + 1;
+            await this._restSetDoc('publicTanks', tankId, { ...currentData, likes: newLikes });
+            return { success: true, newLikes };
         } catch (err) {
             console.error('[FirebaseSync] likeTank error:', err);
             return { success: false, error: err.message };
@@ -533,11 +968,13 @@ const FirebaseSync = {
     }
 };
 
-window.FirebaseSync = FirebaseSync;
-
-// Initiate initialization as soon as loaded
 if (typeof window !== 'undefined') {
+    window.FirebaseSync = FirebaseSync;
     FirebaseSync.init().catch(err => {
         console.warn('[FirebaseSync] Initial load notice:', err);
     });
+}
+
+if (typeof module !== 'undefined' && module.exports) {
+    module.exports = FirebaseSync;
 }

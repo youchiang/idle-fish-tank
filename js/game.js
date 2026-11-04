@@ -51,6 +51,7 @@ class Game {
         // 擴充功能雲端同步暫存標記
         this._pendingExtensionSync = null;
         this._isSavingExtensionSync = false;
+        this._initialCloudSyncDone = false;
 
         this.init();
     }
@@ -844,7 +845,8 @@ class Game {
                 const user = window.FirebaseSync ? window.FirebaseSync.getCurrentUser() : null;
                 updateAuthUI(user);
                 if (user) {
-                    updateStatus('info', '☁️', `雲端已連線，上次同步：${new Date(this.state.lastSavedTime || Date.now()).toLocaleTimeString()}`);
+                    const syncTime = this.state.lastCloudSyncTime || this.state.lastSavedTime || Date.now();
+                    updateStatus('info', '☁️', `雲端已連線，上次同步：${new Date(syncTime).toLocaleTimeString()}`);
                 } else {
                     const isExtension = (typeof chrome !== 'undefined' && chrome.tabs && typeof chrome.tabs.create === 'function') ||
                                         (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.id) ||
@@ -973,16 +975,37 @@ class Game {
                     updateStatus('error', '⚠️', '請先登入 Google 帳號後再進行同步');
                     return;
                 }
-                updateStatus('loading', '⏳', '正在上傳魚缸進度至雲端...');
+                updateStatus('loading', '⏳', '正在同步魚缸進度至雲端...');
                 this.saveState();
                 const saveRes = await window.FirebaseSync.saveToCloud(this.state);
                 if (saveRes.success) {
-                    const timeStr = new Date().toLocaleTimeString();
+                    const syncTime = saveRes.timestamp || Date.now();
+                    this.state.lastCloudSyncTime = syncTime;
+                    await Storage.saveLocalOnly(this.state);
+                    const timeStr = new Date(syncTime).toLocaleTimeString();
                     updateStatus('success', '✅', `雲端存檔已同步成功！(${timeStr})`);
                     this.particles.addFloatingText(this.width / 2, 70, '☁️ 雲端進度已即時更新！', '#00cec9', 16);
                     if (window.soundCtrl) window.soundCtrl.playCoinSound();
                 } else {
-                    updateStatus('error', '❌', `雲端儲存失敗：${saveRes.error || '請檢查網路'}`);
+                    const isExtension = (typeof window !== 'undefined' && window.location && window.location.protocol === 'chrome-extension:') ||
+                                        (typeof chrome !== 'undefined' && chrome.tabs && typeof chrome.tabs.create === 'function');
+                    if (isExtension) {
+                        updateStatus('loading', '🚀', 'REST 直連需要重新授權，正在開啟網頁版同步分頁...');
+                        try {
+                            const payload = this.sanitizeStateForCloudUrl(this.state);
+                            const encodedData = encodeURIComponent(JSON.stringify(payload));
+                            const targetUrl = `https://youchiang.github.io/idle-fish-tank/#cloud_sync=1&data=${encodedData}`;
+                            if (typeof chrome !== 'undefined' && chrome.tabs && typeof chrome.tabs.create === 'function') {
+                                chrome.tabs.create({ url: targetUrl });
+                            } else {
+                                window.open(targetUrl, '_blank');
+                            }
+                        } catch (tabErr) {
+                            updateStatus('error', '❌', `雲端儲存失敗：${saveRes.error || saveRes.reason || '請檢查網路'}`);
+                        }
+                    } else {
+                        updateStatus('error', '❌', `雲端儲存失敗：${saveRes.error || saveRes.reason || '請檢查網路'}`);
+                    }
                 }
             });
         }
@@ -1039,6 +1062,9 @@ class Game {
                         updateStatus('loading', '🔄', '偵測到 Google 帳號已登入，正在將擴充功能魚缸存檔寫入 Firebase 雲端...');
                         const saveRes = await window.FirebaseSync.saveToCloud(this.state);
                         if (saveRes.success) {
+                            const syncTime = saveRes.timestamp || Date.now();
+                            this.state.lastCloudSyncTime = syncTime;
+                            await Storage.saveLocalOnly(this.state);
                             const successMsg = '🎉 恭喜！已成功將擴充功能本機魚缸備份至 Firebase 雲端！未來在任何裝置登入均可同步此魚缸。';
                             updateStatus('success', '🎉', successMsg);
                             this.showToast(successMsg, 'success', 8000);
@@ -1050,6 +1076,7 @@ class Game {
                         }
                     } finally {
                         this._isSavingExtensionSync = false;
+                        this._initialCloudSyncDone = true;
                     }
                 } else if (user && !this._pendingExtensionSync && !this._isAutoSyncing) {
                     // Check if running on web (protocol !== 'chrome-extension:')
@@ -1060,6 +1087,7 @@ class Game {
                             const syncRes = await Storage.syncWithCloud({ preferCloud: true });
                             if (syncRes.action === 'loaded_cloud') {
                                 this.applyState(syncRes.state);
+                                this.state.lastCloudSyncTime = syncRes.state.lastCloudSyncTime || Date.now();
                                 updateStatus('success', '✅', '已同步載入您的雲端水族箱！');
                                 this.showToast('☁️ 已同步載入您的雲端水族箱！', 'success', 5000);
                                 this.particles.addFloatingText(this.width / 2, 70, '☁️ 已載入雲端水族箱！', '#00cec9', 16);
@@ -1071,6 +1099,7 @@ class Game {
                             console.warn('[Game] Auto sync notice:', syncErr);
                         } finally {
                             this._isAutoSyncing = false;
+                            this._initialCloudSyncDone = true;
                         }
                     }
                 }
@@ -2162,7 +2191,14 @@ class Game {
             bornTime: f.bornTime,
             coinsGeneratedTotal: f.coinsGeneratedTotal
         }));
-        Storage.save(this.state);
+
+        // On web, if initial cloud sync has not completed yet, save locally only to avoid overwriting cloud with un-synced local state
+        const isExtension = (typeof window !== 'undefined' && window.location && window.location.protocol === 'chrome-extension:');
+        if (!isExtension && !this._initialCloudSyncDone && window.FirebaseSync && window.FirebaseSync.getCurrentUser()) {
+            Storage.saveLocalOnly(this.state);
+        } else {
+            Storage.save(this.state);
+        }
     }
 
     loop(timestamp) {

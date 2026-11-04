@@ -13,6 +13,7 @@ const Storage = {
             maxFishCount: 4,
             waterCleanliness: 100, // 0 - 100
             lastSavedTime: Date.now(),
+            lastCloudSyncTime: 0,
             soundEnabled: true,
             tankId: 'tank_' + Math.random().toString(36).substring(2, 10),
             tankName: '我的療癒水族箱',
@@ -153,6 +154,8 @@ const Storage = {
 
     /**
      * Save game state locally and, if logged in, asynchronously sync to Firestore.
+     * Throttles background cloud upload to at most once per 30 seconds, and never
+     * overwrites cloud if initial sync is pending or state is empty default.
      * @param {Object} state
      * @returns {Promise<void>}
      */
@@ -162,13 +165,26 @@ const Storage = {
         // 1. Save to local storage first (instant & reliable)
         await this.saveLocalOnly(state);
 
-        // 2. If user is logged into Firebase, asynchronously write to Firestore
-        if (window.FirebaseSync && typeof window.FirebaseSync.getCurrentUser === 'function') {
-            const user = window.FirebaseSync.getCurrentUser();
-            if (user && typeof window.FirebaseSync.saveToCloud === 'function') {
-                window.FirebaseSync.saveToCloud(state).catch(err => {
-                    console.warn('[Storage] Background cloud save notice:', err);
-                });
+        // 2. Throttle background cloud sync (at most once every 30 seconds)
+        const now = Date.now();
+        if (!this._lastBackgroundCloudSync) this._lastBackgroundCloudSync = 0;
+
+        if (now - this._lastBackgroundCloudSync >= 30000) {
+            if (!this._isSyncingCloud && !this.isInitialDefaultState(state)) {
+                if (window.FirebaseSync && typeof window.FirebaseSync.getCurrentUser === 'function') {
+                    const user = window.FirebaseSync.getCurrentUser();
+                    if (user && typeof window.FirebaseSync.saveToCloud === 'function') {
+                        this._lastBackgroundCloudSync = now;
+                        window.FirebaseSync.saveToCloud(state).then(res => {
+                            if (res && res.success && res.timestamp) {
+                                state.lastCloudSyncTime = res.timestamp;
+                                this.saveLocalOnly(state).catch(() => {});
+                            }
+                        }).catch(err => {
+                            console.warn('[Storage] Background cloud save notice:', err);
+                        });
+                    }
+                }
             }
         }
     },
@@ -277,6 +293,7 @@ const Storage = {
         }
 
         try {
+            this._isSyncingCloud = true;
             const localState = await this.load();
             const cloudResult = await window.FirebaseSync.loadFromCloud();
 
@@ -286,53 +303,74 @@ const Storage = {
 
             // Case 1: First time user on cloud (no cloud doc yet) -> upload local state
             if (!cloudResult.exists || !cloudResult.data) {
-                await window.FirebaseSync.saveToCloud(localState);
+                const saveRes = await window.FirebaseSync.saveToCloud(localState);
+                const syncTime = (saveRes && saveRes.timestamp) || Date.now();
+                localState.lastCloudSyncTime = syncTime;
+                await this.saveLocalOnly(localState);
                 return { action: 'uploaded_local', state: localState, message: '雲端尚無存檔，已自動將本機進度同步至雲端！' };
             }
 
             // Case 2: Smart comparison
             const cloudState = this.migrateState(cloudResult.data);
-            const cloudTime = cloudResult.updatedAt || cloudState.lastSavedTime || 0;
-            const localTime = localState.lastSavedTime || 0;
+            const cloudTime = cloudResult.updatedAt || cloudState.lastCloudSyncTime || cloudState.lastSavedTime || 0;
+            const localSyncTime = localState.lastCloudSyncTime || 0;
 
             const isLocalDefault = this.isInitialDefaultState(localState);
             const isCloudDefault = this.isInitialDefaultState(cloudState);
             const localScore = this.getProgressScore(localState);
             const cloudScore = this.getProgressScore(cloudState);
 
-            console.log(`[Storage] Cloud sync check: localScore=${localScore} (default=${isLocalDefault}, time=${localTime}), cloudScore=${cloudScore} (default=${isCloudDefault}, time=${cloudTime}), preferCloud=${!!options.preferCloud}`);
+            console.log(`[Storage] Cloud sync check: localScore=${localScore} (default=${isLocalDefault}, syncTime=${localSyncTime}), cloudScore=${cloudScore} (default=${isCloudDefault}, cloudTime=${cloudTime}), preferCloud=${!!options.preferCloud}`);
 
-            // Rule 1: If local is initial default state and cloud is NOT default -> FORCE adopt cloud!
+            // 1. Force upload if requested
+            if (options.forceUpload === true) {
+                const saveRes = await window.FirebaseSync.saveToCloud(localState);
+                const syncTime = (saveRes && saveRes.timestamp) || Date.now();
+                localState.lastCloudSyncTime = syncTime;
+                await this.saveLocalOnly(localState);
+                return { action: 'uploaded_local', state: localState, message: '已強制將本機魚缸備份至雲端！' };
+            }
+
+            // 2. Force download if requested
+            if (options.forceDownload === true) {
+                cloudState.lastCloudSyncTime = cloudTime;
+                await this.saveLocalOnly(cloudState);
+                return { action: 'loaded_cloud', state: cloudState, message: '已強制同步下載雲端存檔！' };
+            }
+
+            // 3. Local is default empty state and cloud is NOT default -> FORCE adopt cloud!
             if (isLocalDefault && !isCloudDefault) {
+                cloudState.lastCloudSyncTime = cloudTime;
                 await this.saveLocalOnly(cloudState);
                 return { action: 'loaded_cloud', state: cloudState, message: '本機為初始預設狀態，已成功自雲端載入您的水族箱！' };
             }
 
-            // Rule 2: If cloud progress score > local progress score -> FORCE adopt cloud!
-            if (cloudScore > localScore) {
-                await this.saveLocalOnly(cloudState);
-                return { action: 'loaded_cloud', state: cloudState, message: '雲端進度較高，已成功同步下載雲端存檔！' };
-            }
-
-            // Rule 3: If preferCloud is requested and cloud is NOT initial default -> adopt cloud!
-            if (options.preferCloud === true && !isCloudDefault) {
-                await this.saveLocalOnly(cloudState);
-                return { action: 'loaded_cloud', state: cloudState, message: '已優先同步載入您的雲端水族箱存檔！' };
-            }
-
-            // Rule 4: If cloud is newer and cloud is not empty/default -> adopt cloud
-            if (cloudTime > localTime && !isCloudDefault) {
+            // 4. Cloud has newer updates than local's last sync time AND (cloudScore >= localScore OR preferCloud)
+            if ((cloudTime > localSyncTime + 2000) && (cloudScore >= localScore || options.preferCloud === true)) {
+                cloudState.lastCloudSyncTime = cloudTime;
                 await this.saveLocalOnly(cloudState);
                 return { action: 'loaded_cloud', state: cloudState, message: '發現較新的雲端進度，已自動同步更新！' };
             }
 
-            // Rule 5: Local has real progress and is ahead -> upload to cloud
-            await window.FirebaseSync.saveToCloud(localState);
+            // 5. Cloud progress score > local progress score -> FORCE adopt cloud!
+            if (cloudScore > localScore) {
+                cloudState.lastCloudSyncTime = cloudTime;
+                await this.saveLocalOnly(cloudState);
+                return { action: 'loaded_cloud', state: cloudState, message: '雲端進度較高，已成功同步下載雲端存檔！' };
+            }
+
+            // 6. Otherwise: local is ahead -> upload to cloud
+            const saveRes = await window.FirebaseSync.saveToCloud(localState);
+            const syncTime = (saveRes && saveRes.timestamp) || Date.now();
+            localState.lastCloudSyncTime = syncTime;
+            await this.saveLocalOnly(localState);
             return { action: 'uploaded_local', state: localState, message: '本機進度較新，已成功備份至雲端！' };
         } catch (err) {
             console.error('[Storage] syncWithCloud exception:', err);
             const local = await this.load();
             return { action: 'error', state: local, message: err.message || '雲端同步處理失敗' };
+        } finally {
+            this._isSyncingCloud = false;
         }
     },
 
@@ -424,26 +462,37 @@ const Storage = {
             merged.tankName = '我的療癒水族箱';
         }
 
+        merged.lastCloudSyncTime = (typeof state.lastCloudSyncTime === 'number') ? state.lastCloudSyncTime : 0;
+
         return merged;
     }
 };
 
-window.Storage = Storage;
+if (typeof window !== 'undefined') {
+    window.Storage = Storage;
+}
+
+if (typeof module !== 'undefined' && module.exports) {
+    module.exports = Storage;
+}
 
 // Detect if running inside iframe container (e.g. Chrome Extension popup shell)
-if (window.self !== window.top) {
-    document.documentElement.classList.add('in-iframe');
-    if (document.body) {
-        document.body.classList.add('in-iframe');
-    } else {
-        window.addEventListener('DOMContentLoaded', () => {
+if (typeof window !== 'undefined' && window.self !== window.top) {
+    if (typeof document !== 'undefined') {
+        document.documentElement.classList.add('in-iframe');
+        if (document.body) {
             document.body.classList.add('in-iframe');
-        });
+        } else {
+            window.addEventListener('DOMContentLoaded', () => {
+                document.body.classList.add('in-iframe');
+            });
+        }
     }
 }
 
 // PostMessage bridge for migrating Chrome extension local data to GitHub Pages web app
-window.addEventListener('message', async (event) => {
+if (typeof window !== 'undefined') {
+    window.addEventListener('message', async (event) => {
     if (!event.data) return;
 
     // Handle full state delivered from extension content script bridge
@@ -527,4 +576,5 @@ window.addEventListener('message', async (event) => {
     } catch (err) {
         console.error('[Storage Bridge] Error processing IMPORT_EXTENSION_DATA:', err);
     }
-});
+    });
+}
